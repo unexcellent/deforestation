@@ -22,7 +22,6 @@ def worker_init(worker_id: int) -> None:
     os.environ["OMP_NUM_THREADS"] = "1"
     os.environ["OPENBLAS_NUM_THREADS"] = "1"
     os.environ["MKL_NUM_THREADS"] = "1"
-    rasterio.Env().start()
 
 
 def train_one_epoch(
@@ -97,7 +96,7 @@ def main() -> None:
         collate_fn=batch_collate_fn,
         shuffle=True,
         worker_init_fn=worker_init,
-        pin_memory=False,  # Explicitly disable to avoid ROCm DMA pin crashes
+        pin_memory=False,
     )
 
     model = SegmentationModel(in_channels=len(args.bands)).to(device)
