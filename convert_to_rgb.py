@@ -2,20 +2,6 @@ import numpy as np
 from pathlib import Path
 import rasterio
 
-
-# -------------------------
-# NORMALIZATION
-# -------------------------
-
-def percentile_normalize(band):
-    valid = band[band > 0]
-    if len(valid) == 0:
-        return band.astype(np.float32)
-
-    lo, hi = np.percentile(valid, [2, 98])
-    return np.clip((band - lo) / (hi - lo + 1e-6), 0, 1).astype(np.float32)
-
-
 # -------------------------
 # RGB EXTRACTION
 # -------------------------
@@ -25,11 +11,19 @@ def extract_rgb(src):
     green = src.read(3).astype(np.float32)
     blue = src.read(2).astype(np.float32)
 
-    return np.stack([
-        percentile_normalize(red),
-        percentile_normalize(green),
-        percentile_normalize(blue),
-    ], axis=0)  # (C, H, W)
+    rgb = np.stack([red, green, blue], axis=0)  # (C, H, W)
+
+    # -------------------------
+    # NORMALIZATION
+    # -------------------------
+    # Clip using percentiles to remove outliers
+    p2, p98 = np.percentile(rgb, (2, 98))
+    rgb = np.clip(rgb, p2, p98)
+
+    # Scale to [0, 1]
+    rgb = (rgb - p2) / (p98 - p2 + 1e-6)
+
+    return rgb
 
 
 # -------------------------
