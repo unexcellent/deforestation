@@ -2,6 +2,7 @@ import json
 from typing import Sequence
 
 import click
+import geopandas as gpd
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
@@ -93,6 +94,18 @@ def plot_overlay(base: np.ndarray, overlay: np.ndarray, title: str) -> None:
         overlay_plot, label="Tree Index", fraction=0.046, pad=0.04, spacing="uniform"
     )
 
+    plt.title(title)
+    plt.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_geojson(gdf: gpd.GeoDataFrame, title: str) -> None:
+    """
+    Renders a GeoDataFrame using matplotlib.
+    """
+    fig, ax = plt.subplots(figsize=(12, 12))
+    gdf.plot(ax=ax, edgecolor="red", facecolor="none", linewidth=1.5)
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
@@ -203,6 +216,16 @@ def info(path: str) -> None:
         }
 
     click.echo(json.dumps(metadata, indent=2))
+
+
+@_cli.command()
+@click.argument("path", type=click.Path(exists=True))
+def geo(path: str) -> None:
+    """
+    Reads a GeoJSON file and displays its geometries.
+    """
+    gdf = gpd.read_file(path)
+    plot_geojson(gdf, f"GeoJSON: {path}")
 
 
 if __name__ == "__main__":
