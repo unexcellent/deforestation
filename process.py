@@ -162,7 +162,6 @@ def generate_merged_labels(
 
     if earlier_path is not None:
         earlier_mask, _ = _create_merged_mask_for_path(earlier_path, labels_base_dir)
-        # Fix shape mismatch if necessary
         if merged_mask.shape != earlier_mask.shape:
             with rasterio.open(earlier_path) as src_e:
                 earlier_mask = reproject_raster(
@@ -344,7 +343,7 @@ def nvdi_diffs(
     sieve_size: int = 0,
 ) -> None:
     """
-    Generates all chronological NDVI-based loss masks for all locations.
+    Generates adjacent chronological NDVI-based loss masks for all locations.
     """
     base_path = Path(__file__).parent
     if s2_dir is None:
@@ -361,22 +360,21 @@ def nvdi_diffs(
             key=lambda p: tuple(map(int, p.stem.split("_")[-2:])),
         )
 
-        for i, earlier in enumerate(files):
-            for later in files[i + 1 :]:
-                out_name = f"{earlier.stem}_diff_{later.stem}.tif"
-                output_path = output_dir / split / out_name
-                if output_path.exists():
-                    continue
+        for earlier, later in zip(files[:-1], files[1:], strict=False):
+            out_name = f"{earlier.stem}_diff_{later.stem}.tif"
+            output_path = output_dir / split / out_name
+            if output_path.exists():
+                continue
 
-                generate_ndvi_raster(
-                    later,
-                    output_path,
-                    red_band,
-                    nir_band,
-                    earlier,
-                    threshold,
-                    sieve_size,
-                )
+            generate_ndvi_raster(
+                later,
+                output_path,
+                red_band,
+                nir_band,
+                earlier,
+                threshold,
+                sieve_size,
+            )
 
 
 if __name__ == "__main__":

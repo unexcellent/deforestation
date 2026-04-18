@@ -51,6 +51,9 @@ def nvdis(diff_dir: Path, labels_base: Path, sieve_size: int) -> None:
         split = "test" if "test" in diff_path.parts else "train"
         tile_id = early_stem.split("__")[0]
 
+        if split == "test":
+            continue
+
         s2_base = (
             Path("./data/makeathon-challenge/sentinel-2") / split / f"{tile_id}__s2_l2a"
         )
