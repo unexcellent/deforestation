@@ -1,4 +1,3 @@
-import random
 import time
 from pathlib import Path
 
@@ -25,7 +24,12 @@ EPOCHS = 30
 LR = 1e-3
 NUM_WORKERS = 4
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
 
 CHECKPOINT_DIR = Path("checkpoints")
 
@@ -36,6 +40,7 @@ IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
 # -------------------------
 # IMAGE FILTERING (NEW)
 # -------------------------
+
 
 def image_quality_check(img, min_size=256, max_size=2000):
     if img is None:
@@ -79,13 +84,13 @@ def mask_quality_check(mask):
 # PAIR BUILDING (FIXED)
 # -------------------------
 
+
 def build_pairs(split="train"):
     img_dir = IMG_ROOT / split
     mask_dir = MASK_ROOT / split
 
     mask_index = {
-        m.stem.replace("-label", ""): m
-        for m in mask_dir.rglob("*-label.tif")
+        m.stem.replace("-label", ""): m for m in mask_dir.rglob("*-label.tif")
     }
 
     pairs = []
@@ -119,6 +124,7 @@ def build_pairs(split="train"):
 # LOADERS
 # -------------------------
 
+
 def load_image(path):
     arr = np.load(path).astype(np.float32)
     return torch.from_numpy(arr) if arr.ndim == 3 else None
@@ -132,6 +138,7 @@ def load_mask(path):
 # -------------------------
 # PREPROCESSING
 # -------------------------
+
 
 def pad_to_square(x):
     c, h, w = x.shape
@@ -167,6 +174,7 @@ def normalize(img):
 # DATASET
 # -------------------------
 
+
 class SegDataset(Dataset):
     def __init__(self, pairs):
         self.pairs = pairs
@@ -200,6 +208,7 @@ class SegDataset(Dataset):
 # FOCAL LOSS
 # -------------------------
 
+
 class FocalLoss(nn.Module):
     def __init__(self, gamma=2.0, alpha=0.85):
         super().__init__()
@@ -220,7 +229,7 @@ class FocalLoss(nn.Module):
         alpha_t = torch.where(
             targets == 1,
             torch.tensor(self.alpha, device=logits.device),
-            torch.tensor(1 - self.alpha, device=logits.device)
+            torch.tensor(1 - self.alpha, device=logits.device),
         )
 
         return (loss * alpha_t).mean()
@@ -229,6 +238,7 @@ class FocalLoss(nn.Module):
 # -------------------------
 # MODEL
 # -------------------------
+
 
 class Model(nn.Module):
     def __init__(self, num_classes=2):
@@ -243,17 +253,13 @@ class Model(nn.Module):
         self.head = nn.Sequential(
             nn.Conv2d(512, 256, 3, padding=1),
             nn.ReLU(),
-
             nn.ConvTranspose2d(256, 128, 2, stride=2),
             nn.ReLU(),
-
             nn.ConvTranspose2d(128, 64, 2, stride=2),
             nn.ReLU(),
-
             nn.ConvTranspose2d(64, 32, 2, stride=2),
             nn.ReLU(),
-
-            nn.ConvTranspose2d(32, num_classes, 4, stride=4)
+            nn.ConvTranspose2d(32, num_classes, 4, stride=4),
         )
 
     def forward(self, x):
@@ -264,6 +270,7 @@ class Model(nn.Module):
 # -------------------------
 # TRAINING
 # -------------------------
+
 
 def train_one_epoch(model, loader, optimizer, loss_fn):
     model.train()
@@ -290,12 +297,15 @@ def train_one_epoch(model, loader, optimizer, loss_fn):
 # MAIN
 # -------------------------
 
+
 def main():
     CHECKPOINT_DIR.mkdir(exist_ok=True)
 
     pairs = build_pairs("train")
     dataset = SegDataset(pairs)
-    loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS)
+    loader = DataLoader(
+        dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=NUM_WORKERS
+    )
 
     model = Model().to(DEVICE)
 
@@ -310,7 +320,7 @@ def main():
     for epoch in range(EPOCHS):
         loss = train_one_epoch(model, loader, optimizer, loss_fn)
 
-        print(f"Epoch {epoch+1}/{EPOCHS} | Loss: {loss:.4f}")
+        print(f"Epoch {epoch + 1}/{EPOCHS} | Loss: {loss:.4f}")
 
         torch.save(model.state_dict(), run_dir / "last.pth")
 

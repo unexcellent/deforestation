@@ -23,7 +23,7 @@ def reproject_raster(
     """
     Reprojects a 2D raster array to match a destination coordinate system.
     """
-    destination = np.zeros(dst_shape, dtype=np.uint8)
+    destination = np.zeros(dst_shape, dtype=source_array.dtype)
     reproject(
         source=source_array,
         destination=destination,
@@ -162,6 +162,17 @@ def generate_merged_labels(
 
     if earlier_path is not None:
         earlier_mask, _ = _create_merged_mask_for_path(earlier_path, labels_base_dir)
+        # Fix shape mismatch if necessary
+        if merged_mask.shape != earlier_mask.shape:
+            with rasterio.open(earlier_path) as src_e:
+                earlier_mask = reproject_raster(
+                    earlier_mask,
+                    src_e.transform,
+                    src_e.crs,
+                    merged_mask.shape,
+                    s2_meta["transform"],
+                    s2_meta["crs"],
+                )
         merged_mask = merged_mask & (earlier_mask == 0)
 
     s2_meta.update(count=1, dtype="uint8", nodata=0, compress="lzw")
@@ -196,9 +207,6 @@ def generate_ndvi_raster(
 ) -> None:
     """
     Reads Red and NIR bands from a multispectral TIFF, calculates NDVI, and writes a single-band TIFF.
-    If threshold is provided alongside earlier_path, it binarizes both images first to isolate
-    areas that transitioned from "above threshold" to "below threshold".
-    If sieve_size > 0 and threshold is active, removes salt-and-pepper noise from the final mask.
     """
     with rasterio.open(sentinel_path) as src:
         red_data = src.read(red_idx)
@@ -211,14 +219,18 @@ def generate_ndvi_raster(
         with rasterio.open(earlier_path) as src_earlier:
             red_earlier = src_earlier.read(red_idx)
             nir_earlier = src_earlier.read(nir_idx)
+            e_trans, e_crs = src_earlier.transform, src_earlier.crs
 
         earlier_ndvi = calculate_ndvi(red_earlier, nir_earlier)
+
+        if earlier_ndvi.shape != ndvi_data.shape:
+            earlier_ndvi = reproject_raster(
+                earlier_ndvi, e_trans, e_crs, ndvi_data.shape, src.transform, src.crs
+            )
 
         if threshold is not None:
             earlier_forest = (earlier_ndvi > threshold).astype(np.uint8)
             current_forest = (ndvi_data > threshold).astype(np.uint8)
-
-            # Isolated loss: Was forest, is now NOT forest
             ndvi_data = ((earlier_forest == 1) & (current_forest == 0)).astype(np.uint8)
 
             if sieve_size > 0:
@@ -228,7 +240,6 @@ def generate_ndvi_raster(
 
             meta.update(count=1, dtype="uint8", compress="lzw", nodata=0)
         else:
-            # Raw difference
             ndvi_data = np.where(
                 earlier_ndvi > ndvi_data, earlier_ndvi - ndvi_data, 0.0
             ).astype(np.float32)
@@ -237,12 +248,10 @@ def generate_ndvi_raster(
     else:
         if threshold is not None:
             ndvi_data = (ndvi_data > threshold).astype(np.uint8)
-
             if sieve_size > 0:
                 ndvi_data = rasterio.features.sieve(
                     ndvi_data, size=sieve_size, connectivity=8
                 )
-
             meta.update(count=1, dtype="uint8", compress="lzw", nodata=0)
         else:
             meta.update(count=1, dtype="float32", compress="lzw", nodata=None)
@@ -274,10 +283,8 @@ def label(
 ) -> None:
     """
     Generates a combined binary deforestation mask up to the date of the given Sentinel-2 image.
-    If an earlier image path is provided, returns only the deforestation alerts between the two images.
     """
     split = "test" if "test" in sentinel_path.parts else "train"
-
     if labels_dir is None:
         labels_dir = Path(__file__).parent / f"data/makeathon-challenge/labels/{split}"
     if output_path is None:
@@ -285,9 +292,6 @@ def label(
             Path(__file__).parent
             / f"data/preprocessed/labels/{split}/{sentinel_path.stem}-label.tif"
         )
-
-    if not output_path.parent.exists():
-        output_path.parent.mkdir(parents=True)
 
     generate_merged_labels(sentinel_path, labels_dir, output_path, earlier_path)
 
@@ -304,10 +308,9 @@ def labels(
     output_dir: Path | None = None,
 ) -> None:
     """
-    Iterates over all Sentinel-2 TIFFs and generates merged labels for each, matching train/test splits.
+    Iterates over all Sentinel-2 TIFFs and generates merged labels for each.
     """
     base_path = Path(__file__).parent
-
     if s2_dir is None:
         s2_dir = base_path / "data/makeathon-challenge/sentinel-2"
     if labels_dir is None:
@@ -316,124 +319,64 @@ def labels(
         output_dir = base_path / "data/preprocessed/labels"
 
     s2_files = list(s2_dir.rglob("*.tif"))
-    if not s2_files:
-        click.echo(f"No Sentinel-2 TIFFs found in {s2_dir}")
-        return
-
-    for sentinel_path in tqdm.tqdm(s2_files, desc="Processing labels"):
+    for sentinel_path in tqdm.tqdm(s2_files, desc="Labels"):
+        if ".tif." in sentinel_path.name:
+            continue
         split = "test" if "test" in sentinel_path.parts else "train"
-
-        split_output_dir = output_dir / split
-        split_output_dir.mkdir(parents=True, exist_ok=True)
-
         split_labels_dir = labels_dir / split
-        output_path = split_output_dir / f"{sentinel_path.stem}-label.tif"
-
+        output_path = output_dir / split / f"{sentinel_path.stem}-label.tif"
         generate_merged_labels(sentinel_path, split_labels_dir, output_path)
-
-
-@_cli.command()
-@click.argument("sentinel_path", type=click.Path(exists=True, path_type=Path))
-@click.option(
-    "--earlier-path", type=click.Path(exists=True, path_type=Path), required=False
-)
-@click.option("--output-path", type=click.Path(path_type=Path), required=False)
-@click.option("--red-band", type=int, default=4, help="1-based index for the Red band")
-@click.option("--nir-band", type=int, default=8, help="1-based index for the NIR band")
-@click.option(
-    "--threshold",
-    type=float,
-    default=None,
-    help="Binarize output: 1 if > threshold else 0",
-)
-@click.option(
-    "--sieve-size",
-    type=int,
-    default=0,
-    help="Minimum pixel cluster size to keep (removes noise). Requires threshold.",
-)
-def nvdi(
-    sentinel_path: Path,
-    earlier_path: Path | None = None,
-    output_path: Path | None = None,
-    red_band: int = 4,
-    nir_band: int = 8,
-    threshold: float | None = None,
-    sieve_size: int = 0,
-) -> None:
-    """
-    Generates a single-band NDVI raster from a multi-band Sentinel-2 image.
-    If an earlier image path is provided, isolated areas of deforestation are returned.
-    """
-    if output_path is None:
-        split = "test" if "test" in sentinel_path.parts else "train"
-        output_path = (
-            Path(__file__).parent
-            / f"data/preprocessed/ndvi/{split}/{sentinel_path.stem}-ndvi.tif"
-        )
-
-    generate_ndvi_raster(
-        sentinel_path,
-        output_path,
-        red_band,
-        nir_band,
-        earlier_path,
-        threshold,
-        sieve_size,
-    )
 
 
 @_cli.command()
 @click.option("--s2-dir", type=click.Path(exists=True, path_type=Path), required=False)
 @click.option("--output-dir", type=click.Path(path_type=Path), required=False)
-@click.option("--red-band", type=int, default=4, help="1-based index for the Red band")
-@click.option("--nir-band", type=int, default=8, help="1-based index for the NIR band")
-@click.option(
-    "--threshold",
-    type=float,
-    default=None,
-    help="Binarize output: 1 if > threshold else 0",
-)
-@click.option(
-    "--sieve-size",
-    type=int,
-    default=0,
-    help="Minimum pixel cluster size to keep (removes noise). Requires threshold.",
-)
-def nvdis(
+@click.option("--red-band", type=int, default=4)
+@click.option("--nir-band", type=int, default=8)
+@click.option("--threshold", type=float, default=0.5)
+@click.option("--sieve-size", type=int, default=0)
+def nvdi_diffs(
     s2_dir: Path | None = None,
     output_dir: Path | None = None,
     red_band: int = 4,
     nir_band: int = 8,
-    threshold: float | None = None,
+    threshold: float = 0.8,
     sieve_size: int = 0,
 ) -> None:
     """
-    Iterates over all Sentinel-2 TIFFs and generates a single-band NDVI raster for each.
+    Generates all chronological NDVI-based loss masks for all locations.
     """
     base_path = Path(__file__).parent
-
     if s2_dir is None:
         s2_dir = base_path / "data/makeathon-challenge/sentinel-2"
     if output_dir is None:
-        output_dir = base_path / "data/preprocessed/ndvi"
+        output_dir = base_path / "data/preprocessed/nvdi-diffs"
 
-    s2_files = list(s2_dir.rglob("*.tif"))
-    if not s2_files:
-        click.echo(f"No Sentinel-2 TIFFs found in {s2_dir}")
-        return
+    location_dirs = [d for d in s2_dir.rglob("*__s2_l2a") if d.is_dir()]
 
-    for sentinel_path in tqdm.tqdm(s2_files, desc="Processing tree indices"):
-        split = "test" if "test" in sentinel_path.parts else "train"
-
-        split_output_dir = output_dir / split
-        split_output_dir.mkdir(parents=True, exist_ok=True)
-
-        output_path = split_output_dir / f"{sentinel_path.stem}-ndvi.tif"
-
-        generate_ndvi_raster(
-            sentinel_path, output_path, red_band, nir_band, None, threshold, sieve_size
+    for loc_path in tqdm.tqdm(location_dirs, desc="Locations"):
+        split = "test" if "test" in loc_path.parts else "train"
+        files = sorted(
+            [f for f in loc_path.glob("*.tif") if ".tif." not in f.name],
+            key=lambda p: tuple(map(int, p.stem.split("_")[-2:])),
         )
+
+        for i, earlier in enumerate(files):
+            for later in files[i + 1 :]:
+                out_name = f"{earlier.stem}_diff_{later.stem}.tif"
+                output_path = output_dir / split / out_name
+                if output_path.exists():
+                    continue
+
+                generate_ndvi_raster(
+                    later,
+                    output_path,
+                    red_band,
+                    nir_band,
+                    earlier,
+                    threshold,
+                    sieve_size,
+                )
 
 
 if __name__ == "__main__":

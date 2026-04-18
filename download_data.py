@@ -2,6 +2,7 @@ import argparse
 import logging
 from pathlib import Path
 from typing import TypedDict
+from tqdm import tqdm
 
 import boto3
 from botocore import UNSIGNED
@@ -50,20 +51,20 @@ def download_s3_folder(
         # Sort objects by Key. Reverse=True moves 'end' files to the start.
         sorted_objects = sorted(objects, key=lambda x: x["Key"], reverse=reverse)
 
-        for obj in sorted_objects:
+        pbar = tqdm(sorted_objects)
+        for obj in pbar:
             key = obj["Key"]
             target = local_path / key
+            pbar.desc = key.split("/")[-1]
 
             if key.endswith("/") or key == prefix:
                 continue
 
-            target.parent.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Downloading {key} ({obj['Size']} bytes) -> {target}")
-            s3.download_file(bucket_name, key, str(target))
+            if target.exists():
+                continue
 
-        logger.info(
-            f"Successfully downloaded {len(sorted_objects)} files to '{local_dir}'"
-        )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket_name, key, str(target))
 
     except NoCredentialsError:
         logger.error("AWS credentials not found.")
