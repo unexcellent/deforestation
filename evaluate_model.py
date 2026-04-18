@@ -1,196 +1,56 @@
+import argparse
 import random
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
-import rasterio
-import torchvision.models as models
+from dataloader import resize_img, resize_mask
+from model import SegmentationModel
+from model_utils import find_latest_best_model
+from tif_utils import load_tif, normalize_channels, pair_data_to_mask_tif
 
 
-# -------------------------
-# CONFIG
-# -------------------------
+DEVICE = torch.device(
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.mps.is_available()
+    else "cpu"
+)
 
-IMG_ROOT = Path("data/preprocessed/sentinel-2/images")
+IMG_ROOT = Path("data/makeathon-challenge/sentinel-2")
 MASK_ROOT = Path("data/preprocessed/labels")
-CHECKPOINT_ROOT = Path("checkpoints")
 
 IMG_SIZE = (256, 256)
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_CLASSES = 2
 NUM_SAMPLES_TO_SHOW = 10
 
-IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
-IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+RGB_BANDS = [4, 3, 2]
 
 
-# -------------------------
-# MODEL (MATCH TRAINING EXACTLY)
-# -------------------------
-
-class PretrainedSegModel(torch.nn.Module):
-    def __init__(self, num_classes=2):
-        super().__init__()
-
-        backbone = models.resnet18(weights=None)
-        self.encoder = torch.nn.Sequential(*list(backbone.children())[:-2])
-
-        self.head = torch.nn.Sequential(
-            torch.nn.Conv2d(512, 256, 3, padding=1),
-            torch.nn.ReLU(),
-
-            torch.nn.ConvTranspose2d(256, 128, 2, stride=2),
-            torch.nn.ReLU(),
-
-            torch.nn.ConvTranspose2d(128, 64, 2, stride=2),
-            torch.nn.ReLU(),
-
-            torch.nn.ConvTranspose2d(64, 32, 2, stride=2),
-            torch.nn.ReLU(),
-
-            torch.nn.ConvTranspose2d(32, num_classes, 4, stride=4)
-        )
-
-    def forward(self, x):
-        x = self.encoder(x)
-        return self.head(x)
-
-
-# -------------------------
-# CHECKPOINT
-# -------------------------
-
-def find_latest_best_model():
-    runs = sorted(CHECKPOINT_ROOT.iterdir(), reverse=True)
-
-    for run in runs:
-        model_path = run / "best.pth"
-        if model_path.exists():
-            print(f"Using model: {model_path}")
-            return model_path
-
-    raise FileNotFoundError("No best.pth found")
-
-
-# -------------------------
-# PAIRS
-# -------------------------
-
-def build_pairs(split="test"):
-    img_dir = IMG_ROOT / split
-    mask_dir = MASK_ROOT / split
-
-    masks = list(mask_dir.rglob("*-label.tif"))
-
-    pairs = []
-
-    for img_path in img_dir.rglob("*.npy"):
-        key = img_path.stem
-
-        mask_path = next((m for m in masks if m.name.startswith(key)), None)
-
-        if mask_path is not None:
-            pairs.append((img_path, mask_path))
-
-    return pairs
-
-
-# -------------------------
-# LOADERS
-# -------------------------
-
-def load_image(path):
-    img = np.load(path).astype(np.float32)
-    return torch.from_numpy(img)
-
-
-def load_mask(path):
-    with rasterio.open(path) as src:
-        return torch.from_numpy(src.read(1).astype(np.int64))
-
-
-# -------------------------
-# PREPROCESSING
-# -------------------------
-
-def pad_to_square(x):
-    c, h, w = x.shape
-    size = max(h, w)
-
-    pad_h = size - h
-    pad_w = size - w
-
-    return F.pad(x, (0, pad_w, 0, pad_h), value=0)
-
-
-def resize_image(img):
-    img = pad_to_square(img)
-    img = img.unsqueeze(0)
-    img = F.interpolate(img, size=IMG_SIZE, mode="bilinear", align_corners=False)
-    return img.squeeze(0)
-
-
-def resize_mask(mask):
-    if mask.ndim == 3:
-        mask = mask.squeeze(0)
-
-    mask = mask.unsqueeze(0).unsqueeze(0).float()
-    mask = F.interpolate(mask, size=IMG_SIZE, mode="nearest")
-    mask = mask.squeeze(0).squeeze(0).long()
-
-    return (mask > 0).long()
-
-
-def normalize(img):
-    return (img - IMAGENET_MEAN) / IMAGENET_STD
-
-
-def denormalize(img):
-    return img * IMAGENET_STD + IMAGENET_MEAN
-
-
-# -------------------------
-# METRICS (FIXED)
-# -------------------------
-
-def compute_foreground_iou(pred, target):
+def compute_iou(pred: torch.Tensor, target: torch.Tensor) -> float | None:
     pred_fg = pred > 0
-    target_fg = target > 0
-
-    intersection = (pred_fg & target_fg).sum().item()
-    union = (pred_fg | target_fg).sum().item()
-
-    if union == 0:
-        return None
-
-    return intersection / union
+    tgt_fg = target > 0
+    inter = (pred_fg & tgt_fg).sum().item()
+    union = (pred_fg | tgt_fg).sum().item()
+    return None if union == 0 else inter / union
 
 
-def compute_foreground_accuracy(pred, target):
+def compute_acc(pred: torch.Tensor, target: torch.Tensor) -> float | None:
     fg = target > 0
-
     if fg.sum().item() == 0:
         return None
-
-    correct = (pred == target) & fg
-    return correct.sum().item() / fg.sum().item()
+    return ((pred == target) & fg).sum().item() / fg.sum().item()
 
 
-# -------------------------
-# VISUALIZATION
-# -------------------------
-
-def show(rgb, gt, pred):
-    rgb = rgb.numpy().transpose(1, 2, 0)
-    rgb = np.clip(rgb, 0, 1)
+def show(rgb: torch.Tensor, gt: np.ndarray, pred: np.ndarray) -> None:
+    rgb_np = rgb.detach().cpu().numpy().transpose(1, 2, 0)
+    rgb_np = np.clip(rgb_np, 0, 1)
 
     plt.figure(figsize=(12, 6))
 
     plt.subplot(1, 4, 1)
-    plt.imshow(rgb)
+    plt.imshow(rgb_np)
     plt.title("RGB")
     plt.axis("off")
 
@@ -205,7 +65,7 @@ def show(rgb, gt, pred):
     plt.axis("off")
 
     plt.subplot(1, 4, 4)
-    plt.imshow(rgb)
+    plt.imshow(rgb_np)
     plt.imshow(pred, cmap="Reds", alpha=0.4)
     plt.title("Overlay")
     plt.axis("off")
@@ -214,51 +74,85 @@ def show(rgb, gt, pred):
     plt.show()
 
 
-# -------------------------
-# MAIN
-# -------------------------
+def run(
+    checkpoint_path: Path,
+    img_root: Path,
+    mask_root: Path,
+    split: str,
+    bands: list[int],
+    num_samples: int,
+) -> None:
+    pairs = pair_data_to_mask_tif(img_root, mask_root, split)
 
-def main():
-    model_path = find_latest_best_model()
-
-    pairs = build_pairs("train")
-    print(f"Found {len(pairs)} test samples")
-
-    if len(pairs) == 0:
+    print(f"Found {len(pairs)} samples in {split}")
+    if not pairs:
         return
 
-    model = PretrainedSegModel(NUM_CLASSES).to(DEVICE)
-
-    state = torch.load(model_path, map_location=DEVICE)
-    model.load_state_dict(state, strict=True)
-
+    model = SegmentationModel(NUM_CLASSES).to(DEVICE)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE, weights_only=True))
     model.eval()
 
-    samples = random.sample(pairs, min(NUM_SAMPLES_TO_SHOW, len(pairs)))
+    samples = random.sample(pairs, min(num_samples, len(pairs)))
 
-    for img_path, mask_path in samples:
+    for img_path_str, mask_path_str in samples:
+        img_path = Path(img_path_str)
 
-        img = load_image(img_path)[:3]
-        mask = load_mask(mask_path)
+        img, _ = load_tif(img_path, bands=bands)
+        gt, _ = load_tif(mask_path_str)
 
-        img = resize_image(img)
-        mask = resize_mask(mask)
+        img = resize_img(img, IMG_SIZE)
+        gt = resize_mask(gt, IMG_SIZE)
 
-        img = normalize(img)
+        # Removed ImageNet mean/std hardcoding. 
+        # The training pipeline strictly uses min-max [0, 1] normalization.
+        # Leaving it here would cause a distribution mismatch during evaluation.
+        img = normalize_channels(img)
+
+        norm_img = img.unsqueeze(0).to(DEVICE)
 
         with torch.no_grad():
-            pred = model(img.unsqueeze(0).to(DEVICE))
-            pred = torch.argmax(pred, dim=1).squeeze().cpu()
+            pred = model(norm_img)
+            pred = torch.argmax(pred, dim=1).squeeze(0).cpu()
 
-        iou = compute_foreground_iou(pred, mask)
-        acc = compute_foreground_accuracy(pred, mask)
+        iou = compute_iou(pred, gt)
+        acc = compute_acc(pred, gt)
+
+        name = img_path.name
 
         if iou is None or acc is None:
-            print(f"{img_path.name} | No foreground present (metrics skipped)")
+            print(f"{name} | No foreground")
         else:
-            print(f"{img_path.name} | FG IoU: {iou:.3f} | FG Acc: {acc:.3f}")
+            print(f"{name} | IoU: {iou:.3f} | Acc: {acc:.3f}")
 
-        show(denormalize(img.cpu()), mask.numpy(), pred.numpy())
+        show(img, gt.numpy(), pred.numpy())
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--img-root", type=str, default=str(IMG_ROOT))
+    parser.add_argument("--mask-root", type=str, default=str(MASK_ROOT))
+    parser.add_argument("--split", type=str, default="train")
+    parser.add_argument("--bands", nargs="+", type=int, default=RGB_BANDS)
+    parser.add_argument("--samples", type=int, default=NUM_SAMPLES_TO_SHOW)
+
+    args = parser.parse_args()
+
+    checkpoint = (
+        Path(args.checkpoint)
+        if args.checkpoint
+        else find_latest_best_model()
+    )
+
+    run(
+        checkpoint_path=checkpoint,
+        img_root=Path(args.img_root),
+        mask_root=Path(args.mask_root),
+        split=args.split,
+        bands=args.bands,
+        num_samples=args.samples,
+    )
 
 
 if __name__ == "__main__":
