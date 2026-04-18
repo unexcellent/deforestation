@@ -176,7 +176,7 @@ def label(
     if output_path is None:
         output_path = (
             Path(__file__).parent
-            / f"data/processed/{split}/{sentinel_path.stem}-label.tif"
+            / f"data/preprocessed/labels/{split}/{sentinel_path.stem}-label.tif"
         )
 
     if not output_path.parent.exists():
@@ -206,7 +206,7 @@ def labels(
     if labels_dir is None:
         labels_dir = base_path / "data/makeathon-challenge/labels"
     if output_dir is None:
-        output_dir = base_path / "data/processed"
+        output_dir = base_path / "data/preprocessed/labels"
 
     s2_files = list(s2_dir.rglob("*.tif"))
     if not s2_files:
