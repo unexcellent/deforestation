@@ -45,7 +45,7 @@ def reproject_raster(
     """
     Reprojects a 2D raster array to match a destination coordinate system.
     """
-    destination = np.zeros(dst_shape, dtype=np.uint8)
+    destination = np.zeros(dst_shape, dtype=source_array.dtype)
     reproject(
         source=source_array,
         destination=destination,
@@ -72,15 +72,27 @@ def plot_image(image: np.ndarray, title: str) -> None:
 
 def plot_overlay(base: np.ndarray, overlay: np.ndarray, title: str) -> None:
     """
-    Renders a grayscale base image with a red overlay for positive label pixels.
+    Renders a grayscale base image with an overlay using a discrete colormap and legend.
     """
     plt.figure(figsize=(12, 12))
     plt.imshow(base, cmap="gray")
 
-    masked_overlay = np.ma.masked_where(overlay == 0, overlay)
-    cmap = mcolors.ListedColormap(["red"])
+    masked_overlay = np.ma.masked_where(np.isnan(overlay) | (overlay == 0), overlay)
 
-    plt.imshow(masked_overlay, cmap=cmap, interpolation="nearest", alpha=0.6)
+    bounds = [-1.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    colors = ["red", "orange", "yellow", "yellowgreen", "green"]
+
+    cmap = mcolors.ListedColormap(colors)
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    overlay_plot = plt.imshow(
+        masked_overlay, cmap=cmap, norm=norm, interpolation="nearest", alpha=0.6
+    )
+
+    plt.colorbar(
+        overlay_plot, label="Tree Index", fraction=0.046, pad=0.04, spacing="uniform"
+    )
+
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
@@ -134,7 +146,7 @@ def image(path: str, indices: Sequence[int]) -> None:
 )
 def overlay(base_path: str, label_path: str, indices: Sequence[int]) -> None:
     """
-    Averages base image bands into grayscale and overlays reprojected labels in red.
+    Averages base image bands into grayscale and overlays reprojected labels.
     """
     with rasterio.open(base_path) as base_src:
         if max(indices) > base_src.count:

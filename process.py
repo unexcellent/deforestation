@@ -2,10 +2,12 @@ import calendar
 import datetime
 import re
 from pathlib import Path
+from typing import Any
 
 import click
 import numpy as np
 import rasterio
+import rasterio.features
 import tqdm
 from rasterio.warp import Resampling, reproject
 
@@ -101,13 +103,11 @@ def _get_radd_mask(
     return mask, transform, crs
 
 
-def generate_merged_labels(
-    sentinel_path: Path,
-    labels_base_dir: Path,
-    output_path: Path,
-) -> None:
+def _create_merged_mask_for_path(
+    sentinel_path: Path, labels_base_dir: Path
+) -> tuple[np.ndarray, dict[str, Any]]:
     """
-    Generates a merged binary deforestation mask matching the spatial extent and CRS of the given Sentinel-2 TIFF.
+    Creates a combined binary deforestation mask up to the date of the Sentinel-2 image.
     """
     tile_id, year, month = _parse_sentinel_metadata(sentinel_path)
 
@@ -145,11 +145,111 @@ def generate_merged_labels(
         )
         merged_mask |= reprojected
 
+    return merged_mask, s2_meta
+
+
+def generate_merged_labels(
+    sentinel_path: Path,
+    labels_base_dir: Path,
+    output_path: Path,
+    earlier_path: Path | None = None,
+) -> None:
+    """
+    Generates a merged binary deforestation mask matching the spatial extent and CRS of the given Sentinel-2 TIFF.
+    If an earlier_path is provided, it returns only the new deforestation alerts between the two images.
+    """
+    merged_mask, s2_meta = _create_merged_mask_for_path(sentinel_path, labels_base_dir)
+
+    if earlier_path is not None:
+        earlier_mask, _ = _create_merged_mask_for_path(earlier_path, labels_base_dir)
+        merged_mask = merged_mask & (earlier_mask == 0)
+
     s2_meta.update(count=1, dtype="uint8", nodata=0, compress="lzw")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(output_path, "w", **s2_meta) as dst:
         dst.write(merged_mask, 1)
+
+
+def calculate_ndvi(red_band: np.ndarray, nir_band: np.ndarray) -> np.ndarray:
+    """
+    Calculates the Normalized Difference Vegetation Index from Red and NIR arrays.
+    """
+    red = red_band.astype(np.float32)
+    nir = nir_band.astype(np.float32)
+
+    denominator = nir + red
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ndvi = np.where(denominator == 0, 0.0, (nir - red) / denominator)
+
+    return ndvi.astype(np.float32)
+
+
+def generate_ndvi_raster(
+    sentinel_path: Path,
+    output_path: Path,
+    red_idx: int,
+    nir_idx: int,
+    earlier_path: Path | None = None,
+    threshold: float | None = None,
+    sieve_size: int = 0,
+) -> None:
+    """
+    Reads Red and NIR bands from a multispectral TIFF, calculates NDVI, and writes a single-band TIFF.
+    If threshold is provided alongside earlier_path, it binarizes both images first to isolate
+    areas that transitioned from "above threshold" to "below threshold".
+    If sieve_size > 0 and threshold is active, removes salt-and-pepper noise from the final mask.
+    """
+    with rasterio.open(sentinel_path) as src:
+        red_data = src.read(red_idx)
+        nir_data = src.read(nir_idx)
+        meta = src.meta.copy()
+
+    ndvi_data = calculate_ndvi(red_data, nir_data)
+
+    if earlier_path is not None:
+        with rasterio.open(earlier_path) as src_earlier:
+            red_earlier = src_earlier.read(red_idx)
+            nir_earlier = src_earlier.read(nir_idx)
+
+        earlier_ndvi = calculate_ndvi(red_earlier, nir_earlier)
+
+        if threshold is not None:
+            earlier_forest = (earlier_ndvi > threshold).astype(np.uint8)
+            current_forest = (ndvi_data > threshold).astype(np.uint8)
+
+            # Isolated loss: Was forest, is now NOT forest
+            ndvi_data = ((earlier_forest == 1) & (current_forest == 0)).astype(np.uint8)
+
+            if sieve_size > 0:
+                ndvi_data = rasterio.features.sieve(
+                    ndvi_data, size=sieve_size, connectivity=8
+                )
+
+            meta.update(count=1, dtype="uint8", compress="lzw", nodata=0)
+        else:
+            # Raw difference
+            ndvi_data = np.where(
+                earlier_ndvi > ndvi_data, earlier_ndvi - ndvi_data, 0.0
+            ).astype(np.float32)
+            meta.update(count=1, dtype="float32", compress="lzw", nodata=None)
+
+    else:
+        if threshold is not None:
+            ndvi_data = (ndvi_data > threshold).astype(np.uint8)
+
+            if sieve_size > 0:
+                ndvi_data = rasterio.features.sieve(
+                    ndvi_data, size=sieve_size, connectivity=8
+                )
+
+            meta.update(count=1, dtype="uint8", compress="lzw", nodata=0)
+        else:
+            meta.update(count=1, dtype="float32", compress="lzw", nodata=None)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(output_path, "w", **meta) as dst:
+        dst.write(ndvi_data, 1)
 
 
 @click.group()
@@ -160,14 +260,21 @@ def _cli() -> None:
 @_cli.command()
 @click.argument("sentinel_path", type=click.Path(exists=True, path_type=Path))
 @click.option(
+    "--earlier-path", type=click.Path(exists=True, path_type=Path), required=False
+)
+@click.option(
     "--labels-dir", type=click.Path(exists=True, path_type=Path), required=False
 )
 @click.option("--output-path", type=click.Path(path_type=Path), required=False)
 def label(
-    sentinel_path: Path, labels_dir: Path | None = None, output_path: Path | None = None
+    sentinel_path: Path,
+    earlier_path: Path | None = None,
+    labels_dir: Path | None = None,
+    output_path: Path | None = None,
 ) -> None:
     """
     Generates a combined binary deforestation mask up to the date of the given Sentinel-2 image.
+    If an earlier image path is provided, returns only the deforestation alerts between the two images.
     """
     split = "test" if "test" in sentinel_path.parts else "train"
 
@@ -182,7 +289,7 @@ def label(
     if not output_path.parent.exists():
         output_path.parent.mkdir(parents=True)
 
-    generate_merged_labels(sentinel_path, labels_dir, output_path)
+    generate_merged_labels(sentinel_path, labels_dir, output_path, earlier_path)
 
 
 @_cli.command()
@@ -223,6 +330,110 @@ def labels(
         output_path = split_output_dir / f"{sentinel_path.stem}-label.tif"
 
         generate_merged_labels(sentinel_path, split_labels_dir, output_path)
+
+
+@_cli.command()
+@click.argument("sentinel_path", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--earlier-path", type=click.Path(exists=True, path_type=Path), required=False
+)
+@click.option("--output-path", type=click.Path(path_type=Path), required=False)
+@click.option("--red-band", type=int, default=4, help="1-based index for the Red band")
+@click.option("--nir-band", type=int, default=8, help="1-based index for the NIR band")
+@click.option(
+    "--threshold",
+    type=float,
+    default=None,
+    help="Binarize output: 1 if > threshold else 0",
+)
+@click.option(
+    "--sieve-size",
+    type=int,
+    default=0,
+    help="Minimum pixel cluster size to keep (removes noise). Requires threshold.",
+)
+def nvdi(
+    sentinel_path: Path,
+    earlier_path: Path | None = None,
+    output_path: Path | None = None,
+    red_band: int = 4,
+    nir_band: int = 8,
+    threshold: float | None = None,
+    sieve_size: int = 0,
+) -> None:
+    """
+    Generates a single-band NDVI raster from a multi-band Sentinel-2 image.
+    If an earlier image path is provided, isolated areas of deforestation are returned.
+    """
+    if output_path is None:
+        split = "test" if "test" in sentinel_path.parts else "train"
+        output_path = (
+            Path(__file__).parent
+            / f"data/preprocessed/ndvi/{split}/{sentinel_path.stem}-ndvi.tif"
+        )
+
+    generate_ndvi_raster(
+        sentinel_path,
+        output_path,
+        red_band,
+        nir_band,
+        earlier_path,
+        threshold,
+        sieve_size,
+    )
+
+
+@_cli.command()
+@click.option("--s2-dir", type=click.Path(exists=True, path_type=Path), required=False)
+@click.option("--output-dir", type=click.Path(path_type=Path), required=False)
+@click.option("--red-band", type=int, default=4, help="1-based index for the Red band")
+@click.option("--nir-band", type=int, default=8, help="1-based index for the NIR band")
+@click.option(
+    "--threshold",
+    type=float,
+    default=None,
+    help="Binarize output: 1 if > threshold else 0",
+)
+@click.option(
+    "--sieve-size",
+    type=int,
+    default=0,
+    help="Minimum pixel cluster size to keep (removes noise). Requires threshold.",
+)
+def nvdis(
+    s2_dir: Path | None = None,
+    output_dir: Path | None = None,
+    red_band: int = 4,
+    nir_band: int = 8,
+    threshold: float | None = None,
+    sieve_size: int = 0,
+) -> None:
+    """
+    Iterates over all Sentinel-2 TIFFs and generates a single-band NDVI raster for each.
+    """
+    base_path = Path(__file__).parent
+
+    if s2_dir is None:
+        s2_dir = base_path / "data/makeathon-challenge/sentinel-2"
+    if output_dir is None:
+        output_dir = base_path / "data/preprocessed/ndvi"
+
+    s2_files = list(s2_dir.rglob("*.tif"))
+    if not s2_files:
+        click.echo(f"No Sentinel-2 TIFFs found in {s2_dir}")
+        return
+
+    for sentinel_path in tqdm.tqdm(s2_files, desc="Processing tree indices"):
+        split = "test" if "test" in sentinel_path.parts else "train"
+
+        split_output_dir = output_dir / split
+        split_output_dir.mkdir(parents=True, exist_ok=True)
+
+        output_path = split_output_dir / f"{sentinel_path.stem}-ndvi.tif"
+
+        generate_ndvi_raster(
+            sentinel_path, output_path, red_band, nir_band, None, threshold, sieve_size
+        )
 
 
 if __name__ == "__main__":
