@@ -1,8 +1,11 @@
 import argparse
+import os
 import time
 from pathlib import Path
 
+import rasterio
 import torch
+import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
 
 from dataloader import SegDataset, batch_collate_fn
@@ -10,12 +13,23 @@ from model import FocalLoss, SegmentationModel
 from tif_utils import pair_data_to_mask_tif
 
 
+def worker_init(worker_id: int) -> None:
+    """
+    Forces a clean, single-threaded GDAL/Rasterio environment per worker
+    to prevent C-level segmentation faults during concurrent TIFF reads.
+    """
+    os.environ["GDAL_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+
+
 def train_one_epoch(
-    model: torch.nn.Module, 
-    loader: DataLoader, 
-    optimizer: torch.optim.Optimizer, 
+    model: torch.nn.Module,
+    loader: DataLoader,
+    optimizer: torch.optim.Optimizer,
     loss_fn: torch.nn.Module,
-    device: torch.device
+    device: torch.device,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -39,7 +53,9 @@ def train_one_epoch(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Sentinel-2 Segmentation Model")
-    parser.add_argument("--img-root", type=str, default="data/makeathon-challenge/sentinel-2")
+    parser.add_argument(
+        "--img-root", type=str, default="data/makeathon-challenge/sentinel-2"
+    )
     parser.add_argument("--mask-root", type=str, default="data/preprocessed/labels")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     
@@ -50,12 +66,14 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--bands", nargs="+", type=int, default=[4, 3, 2])
-    
+
     args = parser.parse_args()
 
     device = torch.device(
-        "cuda" if torch.cuda.is_available() 
-        else "mps" if torch.mps.is_available() 
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.mps.is_available()
         else "cpu"
     )
 
@@ -65,19 +83,21 @@ def main() -> None:
     img_label_pairs = pair_data_to_mask_tif(
         Path(args.img_root), Path(args.mask_root), "train"
     )
-    
+
     dataset = SegDataset(
         pairs=img_label_pairs, 
-        target_size=tuple(args.img_size),
+        target_size=(args.img_size, args.img_size),
         bands=args.bands
     )
-    
+
     loader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size, 
+        dataset,
+        batch_size=args.batch_size,
         num_workers=args.workers,
         collate_fn=batch_collate_fn,
-        shuffle=True
+        shuffle=True,
+        worker_init_fn=worker_init,
+        pin_memory=False,
     )
 
     model = SegmentationModel(
@@ -108,4 +128,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()
