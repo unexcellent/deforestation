@@ -50,14 +50,8 @@ def filter_input_data(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
     return filtered_pairs
 
 
-def pad_to_square(x: torch.Tensor) -> torch.Tensor:
-    _, h, w = x.shape
-    size = max(h, w)
-    return F.pad(x, (0, size - w, 0, size - h), value=0)
-
-
 def resize_img(img: torch.Tensor, target_size: tuple[int, int]) -> torch.Tensor:
-    img = pad_to_square(img).unsqueeze(0)
+    img = img.unsqueeze(0)
     img = F.interpolate(img, size=target_size, mode="bilinear", align_corners=False)
     return img.squeeze(0)
 

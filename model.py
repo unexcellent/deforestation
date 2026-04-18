@@ -48,27 +48,27 @@ class DoubleConv(nn.Module):
 
 
 class SegmentationModel(nn.Module):
-    def __init__(self, in_channels: int = 12, num_classes: int = 2) -> None:
+    def __init__(self, in_channels: int = 12, num_classes: int = 2, base_c: int = 16) -> None:
         super().__init__()
 
         # Encoder
-        self.inc = DoubleConv(in_channels, 64)
-        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
-        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(128, 256))
-        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(256, 512))
+        self.inc = DoubleConv(in_channels, base_c)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(base_c, base_c * 2))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(base_c * 2, base_c * 4))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(base_c * 4, base_c * 8))
 
         # Decoder with skip connections
-        self.up1 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.conv1 = DoubleConv(512, 256)
+        self.up1 = nn.ConvTranspose2d(base_c * 8, base_c * 4, kernel_size=2, stride=2)
+        self.conv1 = DoubleConv(base_c * 8, base_c * 4)
 
-        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.conv2 = DoubleConv(256, 128)
+        self.up2 = nn.ConvTranspose2d(base_c * 4, base_c * 2, kernel_size=2, stride=2)
+        self.conv2 = DoubleConv(base_c * 4, base_c * 2)
 
-        self.up3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.conv3 = DoubleConv(128, 64)
+        self.up3 = nn.ConvTranspose2d(base_c * 2, base_c, kernel_size=2, stride=2)
+        self.conv3 = DoubleConv(base_c * 2, base_c)
 
         # Classifier head
-        self.outc = nn.Conv2d(64, num_classes, kernel_size=1)
+        self.outc = nn.Conv2d(base_c, num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Downsampling path

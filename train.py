@@ -43,9 +43,10 @@ def main() -> None:
     parser.add_argument("--mask-root", type=str, default="data/preprocessed/labels")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
     
-    parser.add_argument("--img-size", type=int, default=256)
+    # Updated to accept two integers (Height and Width)
+    parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256], help="Target size as H W")
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--bands", nargs="+", type=int, default=[4, 3, 2])
@@ -67,7 +68,7 @@ def main() -> None:
     
     dataset = SegDataset(
         pairs=img_label_pairs, 
-        target_size=(args.img_size, args.img_size),
+        target_size=tuple(args.img_size),
         bands=args.bands
     )
     
@@ -79,7 +80,11 @@ def main() -> None:
         shuffle=True
     )
 
-    model = SegmentationModel(in_channels=len(args.bands)).to(device)
+    model = SegmentationModel(
+        in_channels=len(args.bands), 
+        num_classes=2, 
+        base_c=16
+    ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = FocalLoss(gamma=2.0, alpha=0.75)
