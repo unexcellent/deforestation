@@ -1,12 +1,15 @@
+import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import rasterio
+from rasterio.warp import Resampling, reproject
 import torch
 
 
 def save_tif(mask: np.ndarray, meta: dict[str, Any], out_path: str | Path) -> None:
+    """Saves a single-band mask to a GeoTIFF file."""
     out_path = Path(out_path)
     meta.update(count=1, dtype="uint8", compress="lzw", nodata=0)
 
@@ -27,11 +30,9 @@ def load_tif(
                 for b in bands:
                     if b < 1 or b > src.count:
                         raise ValueError(f"Invalid band {b} for {path}")
-
                 img = src.read(bands).astype(np.float32)
             else:
                 img = src.read().astype(np.float32)
-
                 if img.ndim == 2:
                     img = img[np.newaxis, :, :]
             
@@ -46,10 +47,7 @@ def load_tif(
 def normalize_channels(
     img: torch.Tensor | np.ndarray, channels: list[int] | None = None
 ) -> torch.Tensor | np.ndarray:
-    """
-    Normalizes specified channels of an image to the [0, 1] range independently.
-    If channels is None, normalizes all channels.
-    """
+    """Normalizes specified channels to the [0, 1] range independently."""
     is_tensor = isinstance(img, torch.Tensor)
     out = img.clone() if is_tensor else img.copy()
 
@@ -72,18 +70,66 @@ def normalize_channels(
     return out
 
 
-def pair_data_to_mask_tif(
+def reproject_to_match(
+    src_data: np.ndarray,
+    src_meta: dict[str, Any],
+    dst_meta: dict[str, Any],
+    is_mask: bool = False,
+) -> np.ndarray:
+    """Reprojects source data to match the destination metadata's CRS, transform, and shape."""
+    dst_shape = (dst_meta["height"], dst_meta["width"])
+    c_dim = src_data.shape[0] if src_data.ndim == 3 else 1
+    destination = np.zeros((c_dim, *dst_shape), dtype=src_data.dtype)
+    
+    reproject(
+        source=src_data,
+        destination=destination,
+        src_transform=src_meta["transform"],
+        src_crs=src_meta["crs"],
+        dst_transform=dst_meta["transform"],
+        dst_crs=dst_meta["crs"],
+        resampling=Resampling.nearest if is_mask else Resampling.bilinear,
+    )
+    return destination
+
+
+def pair_temporal_samples(
     data_root: str | Path, mask_root: str | Path, split: str
-) -> list[tuple[str, str]]:
+) -> list[dict[str, str]]:
+    """Finds pairs of images exactly one year apart in the same location."""
     img_dir = Path(data_root) / split
     mask_dir = Path(mask_root) / split
-
     mask_map = {m.name.replace("-label.tif", ""): m for m in mask_dir.rglob("*-label.tif")}
+    
     pairs = []
+    pattern = re.compile(r"(.+)__s2_l2a_(\d{4})_(\d+)")
 
-    for img_path in img_dir.rglob("*.tif"):
-        key = img_path.stem
-        if key in mask_map:
-            pairs.append((str(img_path), str(mask_map[key])))
+    if not img_dir.exists():
+        return []
 
+    locations = [d for d in img_dir.iterdir() if d.is_dir()]
+    for loc in locations:
+        files = list(loc.glob("*.tif"))
+        metadata = []
+        for f in files:
+            match = pattern.search(f.name)
+            if match:
+                metadata.append({
+                    "path": f,
+                    "stem": f.stem,
+                    "year": int(match.group(2)),
+                    "month": int(match.group(3))
+                })
+        
+        for early in metadata:
+            for late in metadata:
+                if late["year"] == early["year"] + 1 and late["month"] == early["month"]:
+                    if early["stem"] in mask_map and late["stem"] in mask_map:
+                        pairs.append({
+                            "img_early": str(early["path"]),
+                            "img_late": str(late["path"]),
+                            "mask_early": str(mask_map[early["stem"]]),
+                            "mask_late": str(mask_map[late["stem"]])
+                        })
+                        
     return pairs
