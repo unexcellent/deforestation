@@ -1,7 +1,9 @@
 import argparse
+import os
 import time
 from pathlib import Path
 
+import rasterio
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
@@ -9,6 +11,18 @@ from torch.utils.data import DataLoader
 from dataloader import SegDataset, batch_collate_fn
 from model import FocalLoss, SegmentationModel
 from tif_utils import pair_data_to_mask_tif
+
+
+def worker_init(worker_id: int) -> None:
+    """
+    Forces a clean, single-threaded GDAL/Rasterio environment per worker
+    to prevent C-level segmentation faults during concurrent TIFF reads.
+    """
+    os.environ["GDAL_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    rasterio.Env().start()
 
 
 def train_one_epoch(
@@ -63,8 +77,6 @@ def main() -> None:
         else "cpu"
     )
 
-    print(f"Using {device}")
-
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +96,8 @@ def main() -> None:
         num_workers=args.workers,
         collate_fn=batch_collate_fn,
         shuffle=True,
+        worker_init_fn=worker_init,
+        pin_memory=False,  # Explicitly disable to avoid ROCm DMA pin crashes
     )
 
     model = SegmentationModel(in_channels=len(args.bands)).to(device)
