@@ -8,6 +8,8 @@ dependencies = [
   "pytorch-triton-rocm>=3.5.1 ; sys_platform == 'linux'",
   "rasterio>=1.5.0",
   "tqdm>=4.67.3",
+  "matplotlib>=3.10.8",
+  "numpy>=2.4.4",
 ]
 
 [tool.uv.sources]
