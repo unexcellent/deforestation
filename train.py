@@ -23,12 +23,19 @@ def worker_init(worker_id: int) -> None:
 
 
 def compute_iou(preds: torch.Tensor, masks: torch.Tensor, eps: float = 1e-6) -> float:
-    """Computes Intersection over Union for binary segmentation."""
-    # Convert logits to binary predictions
-    preds = (torch.sigmoid(preds) > 0.5).float()
-    
-    intersection = (preds * masks).sum(dim=(1, 2))
-    union = preds.sum(dim=(1, 2)) + masks.sum(dim=(1, 2)) - intersection
+    """Computes IoU for binary segmentation handling 1 or 2 output channels."""
+    # Handle both 1-channel (BCE style) and 2-channel (CE style) outputs
+    if preds.shape[1] > 1:
+        # Multiclass: [B, 2, H, W] -> [B, H, W]
+        preds = torch.argmax(preds, dim=1)
+    else:
+        # Binary: [B, 1, H, W] -> [B, H, W]
+        preds = (torch.sigmoid(preds) > 0.5).squeeze(1)
+
+    # Intersection and Union for the positive class (1)
+    # We use logical operators to ensure we only count deforestation pixels
+    intersection = ((preds == 1) & (masks == 1)).float().sum(dim=(1, 2))
+    union = ((preds == 1) | (masks == 1)).float().sum(dim=(1, 2))
     
     iou = (intersection + eps) / (union + eps)
     return iou.mean().item()
@@ -120,12 +127,11 @@ def main() -> None:
         mask_root=args.mask_root,
         target_size=args.img_size,
         bands=args.bands,
-        split="train",         # Scans 'train' subfolder
+        split="train", 
         train_ratio=args.split_ratio,
         batch_size=args.batch_size,
         num_workers=args.workers,
-        worker_init_fn=worker_init,
-        pin_memory=False
+        worker_init_fn=worker_init
     )
 
     print(f"Dataset Split: {len(train_loader.dataset)} train | {len(val_loader.dataset)} val")
