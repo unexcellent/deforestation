@@ -31,14 +31,17 @@ class FocalLoss(nn.Module):
 
 
 class SegmentationModel(nn.Module):
-    def __init__(self, num_classes: int = 2) -> None:
+    def __init__(self, in_channels: int = 3, num_classes: int = 2) -> None:
         super().__init__()
 
         backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        self.encoder = nn.Sequential(*list(backbone.children())[:-2])
+        
+        if in_channels != 3:
+            backbone.conv1 = nn.Conv2d(
+                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
 
-        for p in self.encoder.parameters():
-            p.requires_grad = False
+        self.encoder = nn.Sequential(*list(backbone.children())[:-2])
 
         self.head = nn.Sequential(
             nn.Conv2d(512, 256, 3, padding=1),

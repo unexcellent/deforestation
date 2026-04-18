@@ -79,7 +79,7 @@ def main() -> None:
         shuffle=True
     )
 
-    model = SegmentationModel().to(device)
+    model = SegmentationModel(in_channels=len(args.bands)).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = FocalLoss(gamma=2.0, alpha=0.75)

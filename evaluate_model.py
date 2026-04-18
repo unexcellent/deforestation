@@ -22,7 +22,6 @@ IMG_ROOT = Path("data/makeathon-challenge/sentinel-2")
 MASK_ROOT = Path("data/preprocessed/labels")
 
 IMG_SIZE = (256, 256)
-NUM_CLASSES = 2
 NUM_SAMPLES_TO_SHOW = 10
 
 RGB_BANDS = [4, 3, 2]
@@ -88,7 +87,7 @@ def run(
     if not pairs:
         return
 
-    model = SegmentationModel(NUM_CLASSES).to(DEVICE)
+    model = SegmentationModel(in_channels=len(bands)).to(DEVICE)
     model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE, weights_only=True))
     model.eval()
 
@@ -97,18 +96,16 @@ def run(
     for img_path_str, mask_path_str in samples:
         img_path = Path(img_path_str)
 
-        img, _ = load_tif(img_path, bands=bands)
+        img, _ = load_tif(img_path, bands=[4, 3, 2])
+        data, _ = load_tif(img_path, bands=bands)
         gt, _ = load_tif(mask_path_str)
 
-        img = resize_img(img, IMG_SIZE)
+        data = resize_img(data, IMG_SIZE)
         gt = resize_mask(gt, IMG_SIZE)
 
-        # Removed ImageNet mean/std hardcoding. 
-        # The training pipeline strictly uses min-max [0, 1] normalization.
-        # Leaving it here would cause a distribution mismatch during evaluation.
-        img = normalize_channels(img)
+        data = normalize_channels(data)
 
-        norm_img = img.unsqueeze(0).to(DEVICE)
+        norm_img = data.unsqueeze(0).to(DEVICE)
 
         with torch.no_grad():
             pred = model(norm_img)
@@ -124,6 +121,8 @@ def run(
         else:
             print(f"{name} | IoU: {iou:.3f} | Acc: {acc:.3f}")
 
+        img = resize_img(img, IMG_SIZE)
+        img = normalize_channels(img)
         show(img, gt.numpy(), pred.numpy())
 
 
