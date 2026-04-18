@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +18,7 @@ def raster_to_geojson(
     raster_path: str | Path,
     output_path: str | Path | None = None,
     min_area_ha: float = 0.5,
+    time_step: str | None = None,
 ) -> dict:
     """Convert a binary deforestation prediction raster to a GeoJSON FeatureCollection.
 
@@ -41,6 +43,7 @@ def raster_to_geojson(
             computed in the appropriate UTM projection so the filter is
             metric-accurate regardless of the raster's native CRS. Defaults
             to ``0.5``.
+        time_step: Optional string representing the YYMM date of deforestation.
 
     Returns:
         A GeoJSON-compatible ``dict`` representing a FeatureCollection. Each
@@ -94,7 +97,7 @@ def raster_to_geojson(
             "Lower the threshold or check your prediction raster."
         )
 
-    gdf["time_step"] = None
+    gdf["time_step"] = time_step
 
     geojson = json.loads(gdf.to_json())
 
@@ -205,6 +208,103 @@ def nvdis(
 
         with open(out_path, "w") as f:
             json.dump(final_geojson, f)
+
+
+@cli.command("model")
+@click.option(
+    "--preds-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("data/model_output_test"),
+)
+@click.option(
+    "--output-path",
+    type=click.Path(path_type=Path),
+    default=Path("data/submission/test_submission.geojson"),
+)
+@click.option("--min-area-ha", type=float, default=0.5)
+def model_cmd(preds_dir: Path, output_path: Path, min_area_ha: float) -> None:
+    """
+    Creates the final GeoJSON by accumulating deforestation predictions chronologically.
+    Assigns the time_step (YYMM) based on the subsequent year's observation.
+    """
+    loc_groups: dict[str, list[tuple[int, int, Path]]] = defaultdict(list)
+
+    for f in preds_dir.glob("*_pred.tif"):
+        match = re.search(r"([A-Z0-9_]+)__s2_l2a_(\d{4})_(\d+)", f.name)
+        if match:
+            loc_id = match.group(1)
+            year = int(match.group(2))
+            month = int(match.group(3))
+            loc_groups[loc_id].append((year, month, f))
+
+    all_features = []
+
+    for loc_id, items in tqdm.tqdm(
+        loc_groups.items(), desc="Processing temporal predictions"
+    ):
+        items.sort(key=lambda x: (x[0], x[1]))
+
+        accumulated_mask = None
+        base_meta = None
+
+        for early_year, month, fpath in items:
+            with rasterio.open(fpath) as src:
+                data = src.read(1)
+
+                if base_meta is None:
+                    base_meta = src.meta.copy()
+                    accumulated_mask = np.zeros_like(data, dtype=np.uint8)
+                elif data.shape != accumulated_mask.shape:
+                    reprojected_data = np.zeros_like(accumulated_mask)
+                    reproject(
+                        source=data,
+                        destination=reprojected_data,
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        dst_transform=base_meta["transform"],
+                        dst_crs=base_meta["crs"],
+                        resampling=Resampling.nearest,
+                    )
+                    data = reprojected_data
+
+            new_deforestation = ((data == 1) & (accumulated_mask == 0)).astype(np.uint8)
+
+            if new_deforestation.sum() > 0:
+                with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
+                    tmp_path = Path(tmp.name)
+
+                base_meta.update(dtype="uint8", nodata=0, count=1)
+                with rasterio.open(tmp_path, "w", **base_meta) as dst:
+                    dst.write(new_deforestation, 1)
+
+                late_year = early_year + 1
+                time_step = f"{late_year % 100:02d}{month:02d}"
+
+                try:
+                    geojson = raster_to_geojson(
+                        raster_path=tmp_path,
+                        min_area_ha=min_area_ha,
+                        time_step=time_step,
+                    )
+                    all_features.extend(geojson["features"])
+                except ValueError:
+                    pass
+                finally:
+                    tmp_path.unlink(missing_ok=True)
+
+            accumulated_mask |= (data == 1).astype(np.uint8)
+
+    if not all_features:
+        click.secho("No features passed the threshold.", fg="yellow")
+        return
+
+    final_geojson = {"type": "FeatureCollection", "features": all_features}
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(output_path, "w") as f:
+        json.dump(final_geojson, f)
+
+    click.secho(f"Submission successfully saved to {output_path}", fg="green")
 
 
 if __name__ == "__main__":

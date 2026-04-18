@@ -125,9 +125,12 @@ def model_cmd(
     bands: str,
     base_c: int,
 ) -> None:
-    # Click does not natively support argparse's nargs='+' on options cleanly.
-    # To pass multiple space-separated bands as a single string, wrap them in quotes in the CLI:
-    # python predict.py model <path> --img-size 512 512 --bands "2 3 4 5 6 7 8 9"
+    if input_path.suffix not in [".tif", ".tiff"]:
+        raise click.BadParameter(
+            f"Expected a .tif file for the input image, got '{input_path.name}'. "
+            "If you meant to provide a checkpoint, use the --checkpoint flag."
+        )
+
     checkpoint_path = checkpoint if checkpoint else find_latest_best_model()
     parsed_bands = [int(b) for b in bands.replace(",", " ").split()]
 
@@ -138,6 +141,66 @@ def model_cmd(
         img_size=img_size,
         bands=parsed_bands,
         base_c=base_c,
+    )
+
+
+@cli.command("models")
+@click.option(
+    "--test-dir",
+    type=click.Path(exists=True, path_type=Path),
+    default=Path("data/makeathon-challenge/sentinel-2/test"),
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("data/model_output_test"),
+)
+@click.option("--checkpoint", type=click.Path(path_type=Path), default=None)
+@click.option("--img-size", type=int, nargs=2, default=(512, 512))
+@click.option("--bands", type=str, default="2 3 4 5 6 7 8 9")
+@click.option("--base-c", type=int, default=32)
+def models_cmd(
+    test_dir: Path,
+    output_dir: Path,
+    checkpoint: Path | None,
+    img_size: tuple[int, int],
+    bands: str,
+    base_c: int,
+) -> None:
+    """Predicts deforestation for all January images in the test set using a +1 year pair."""
+    checkpoint_path = checkpoint if checkpoint else find_latest_best_model()
+    parsed_bands = [int(b) for b in bands.replace(",", " ").split()]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for tif_path in test_dir.rglob("*.tif"):
+        match = re.search(r"([A-Z0-9_]+)__s2_l2a_(\d{4})_(\d+)", tif_path.name)
+        if match and int(match.group(3)) == 1:
+            try:
+                # Ensure the +1 year image exists before predicting
+                get_late_image_path(tif_path)
+            except FileNotFoundError:
+                click.secho(
+                    f"Skipping {tif_path.name}: Expected +1 year pair not found.",
+                    fg="yellow",
+                )
+                continue
+
+            out_path = output_dir / f"{tif_path.stem}_pred.tif"
+            click.echo(f"Processing {tif_path.name}...")
+
+            predict_temporal_pair(
+                early_path=tif_path,
+                checkpoint_path=checkpoint_path,
+                output_path=out_path,
+                img_size=img_size,
+                bands=parsed_bands,
+                base_c=base_c,
+            )
+
+    click.secho(
+        f"\nAll eligible test images processed. Outputs saved to {output_dir}",
+        fg="green",
     )
 
 
