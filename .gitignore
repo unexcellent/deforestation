@@ -210,6 +210,7 @@ __marimo__/
 data/
 *.tif
 *.tiff
+*.pth
 
 uv.lock
 pyproject.toml

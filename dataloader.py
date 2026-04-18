@@ -8,12 +8,28 @@ from torch.utils.data import DataLoader, Dataset
 
 from tif_utils import load_tif
 
+BLACKLIST: list[str] = [
+    "48PXC_7_7__s2_l2a_2024_9.tif",
+    "48PYB_3_6__s2_l2a_2020_12.tif",
+    "47QMB_0_8__s2_l2a_2024_11.tif",
+    "48PXC_7_7__s2_l2a_2025_12.tif",
+    "48PWV_7_8__s2_l2a_2024_9.tif",
+    "47QMB_0_8__s2_l2a_2024_6.tif",
+]
+
+
+def _is_blacklisted(path: Path) -> bool:
+    if not BLACKLIST:
+        return False
+    path_str = str(path)
+    return any(b in path_str for b in BLACKLIST)
+
 
 def image_quality_check(
-    img: torch.Tensor | None, 
-    min_size: int = 256, 
+    img: torch.Tensor | None,
+    min_size: int = 256,
     max_size: int = 2000,
-    saturation_threshold: float = 0.95
+    saturation_threshold: float = 0.95,
 ) -> bool:
     """Checks for sensor artifacts, clipping, and sufficient variance."""
     if img is None or img.ndim != 3:
@@ -37,14 +53,13 @@ def image_quality_check(
 
 
 def mask_quality_check(
-    mask: torch.Tensor, 
-    min_foreground_ratio: float = 0.0001 
+    mask: torch.Tensor, min_foreground_ratio: float = 0.0001
 ) -> bool:
     """Filters empty masks or those with negligible foreground signal."""
     total_pixels = mask.numel()
     if total_pixels == 0:
         return False
-        
+
     foreground_pixels = torch.count_nonzero(mask)
     ratio = foreground_pixels.float() / total_pixels
     return ratio > min_foreground_ratio
@@ -67,7 +82,9 @@ def resize_img(img: torch.Tensor, target_size: Any) -> torch.Tensor:
     if img.ndim == 3:
         img = img.unsqueeze(0)
     int_size = _parse_target_size(target_size)
-    img = F.interpolate(img.float(), size=int_size, mode="bilinear", align_corners=False)
+    img = F.interpolate(
+        img.float(), size=int_size, mode="bilinear", align_corners=False
+    )
     return img.squeeze(0)
 
 
@@ -103,15 +120,16 @@ def normalize_batch(
 
 class SegDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """
-    Internal dataset class. 
+    Internal dataset class.
     Users should prefer SegDataLoader.create_split_loaders.
     """
+
     def __init__(
-        self, 
+        self,
         image_paths: list[Path],
         mask_paths: list[Path],
         target_size: Any,
-        bands: list[int] | None = None
+        bands: list[int] | None = None,
     ) -> None:
         self.image_paths = image_paths
         self.mask_paths = mask_paths
@@ -126,13 +144,15 @@ class SegDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         mask, _ = load_tif(str(self.mask_paths[idx]))
 
         if data is None or mask is None:
-            raise RuntimeError(f"Failed to load TIFF at index {idx}: {self.image_paths[idx]}")
+            raise RuntimeError(
+                f"Failed to load TIFF at index {idx}: {self.image_paths[idx]}"
+            )
 
         return resize_img(data, self.target_size), resize_mask(mask, self.target_size)
 
 
 def batch_collate_fn(
-    batch: list[tuple[torch.Tensor, torch.Tensor]]
+    batch: list[tuple[torch.Tensor, torch.Tensor]],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Stacks samples and applies normalization."""
     data_stack = normalize_batch(torch.stack([item[0] for item in batch]))
@@ -155,8 +175,8 @@ class SegDataLoader:
         self.dataset = SegDataset(
             image_paths=image_paths,
             mask_paths=mask_paths,
-            target_size=target_size, 
-            bands=bands
+            target_size=target_size,
+            bands=bands,
         )
 
         self.loader = DataLoader(
@@ -179,7 +199,7 @@ class SegDataLoader:
         seed: int = 42,
         apply_filter: bool = True,
         bands: list[int] | None = None,
-        **loader_kwargs
+        **loader_kwargs,
     ) -> tuple["SegDataLoader", "SegDataLoader"]:
         """
         Handles discovery, quality filtering, and splitting in one step.
@@ -189,13 +209,16 @@ class SegDataLoader:
 
         # 1. Discover potential pairs
         mask_map = {
-            m.name.replace("-label.tif", ""): m 
+            m.name.replace("-label.tif", ""): m
             for m in mask_dir.rglob("*-label.tif")
+            if not _is_blacklisted(m)
         }
 
         potential_pairs = []
         for img_path in img_dir.rglob("*.tif"):
             if img_path.name.endswith("-label.tif"):
+                continue
+            if _is_blacklisted(img_path):
                 continue
             if img_path.stem in mask_map:
                 potential_pairs.append((img_path, mask_map[img_path.stem]))
@@ -216,7 +239,7 @@ class SegDataLoader:
         # 3. Split
         random.seed(seed)
         random.shuffle(valid_pairs)
-        
+
         split_idx = int(len(valid_pairs) * train_ratio)
         train_pairs = valid_pairs[:split_idx]
         val_pairs = valid_pairs[split_idx:]
@@ -228,7 +251,7 @@ class SegDataLoader:
             target_size=target_size,
             bands=bands,
             shuffle=True,
-            **loader_kwargs
+            **loader_kwargs,
         )
         val_loader = cls(
             image_paths=[p[0] for p in val_pairs],
@@ -236,7 +259,7 @@ class SegDataLoader:
             target_size=target_size,
             bands=bands,
             shuffle=False,
-            **loader_kwargs
+            **loader_kwargs,
         )
 
         return train_loader, val_loader
