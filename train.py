@@ -3,10 +3,10 @@ import os
 import time
 from pathlib import Path
 
-import rasterio
 import torch
 import torch.multiprocessing as mp
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from dataloader import SegDataset, batch_collate_fn
 from model import FocalLoss, SegmentationModel
@@ -34,19 +34,38 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
 
-    for imgs, masks in loader:
-        imgs = imgs.to(device)
-        masks = masks.to(device)
+    pbar = tqdm(loader, desc="Training")
+    
+    # Timing logic to identify bottlenecks
+    iter_start = time.perf_counter()
+    
+    for imgs, masks in pbar:
+        # Time spent in DataLoader (Disk I/O + resize + normalize)
+        io_time = time.perf_counter() - iter_start
+        
+        compute_start = time.perf_counter()
+        
+        imgs = imgs.to(device, non_blocking=True)
+        masks = masks.to(device, non_blocking=True)
 
         preds = model(imgs)
-
         loss = loss_fn(preds, masks)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
+        # Time spent on GPU Forward/Backward
+        compute_time = time.perf_counter() - compute_start
         total_loss += loss.item()
+
+        pbar.set_postfix({
+            "loss": f"{loss.item():.4f}",
+            "io_s": f"{io_time:.3f}",
+            "gpu_s": f"{compute_time:.3f}"
+        })
+        
+        iter_start = time.perf_counter()
 
     return total_loss / len(loader)
 
@@ -58,8 +77,6 @@ def main() -> None:
     )
     parser.add_argument("--mask-root", type=str, default="data/preprocessed/labels")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
-    
-    # Updated to accept two integers (Height and Width)
     parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256], help="Target size as H W")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
@@ -80,13 +97,14 @@ def main() -> None:
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    print("Indexing dataset...")
     img_label_pairs = pair_data_to_mask_tif(
         Path(args.img_root), Path(args.mask_root), "train"
     )
 
     dataset = SegDataset(
         pairs=img_label_pairs, 
-        target_size=(args.img_size, args.img_size),
+        target_size=tuple(args.img_size),
         bands=args.bands
     )
 
@@ -97,7 +115,8 @@ def main() -> None:
         collate_fn=batch_collate_fn,
         shuffle=True,
         worker_init_fn=worker_init,
-        pin_memory=False,
+        # pin_memory speeds up CPU to GPU transfers
+        pin_memory=True if device.type == "cuda" else False,
     )
 
     model = SegmentationModel(
@@ -115,16 +134,15 @@ def main() -> None:
     best = float("inf")
 
     for epoch in range(args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
         loss = train_one_epoch(model, loader, optimizer, loss_fn, device)
-
-        print(f"Epoch {epoch + 1}/{args.epochs} | Loss: {loss:.4f}")
 
         torch.save(model.state_dict(), run_dir / "last.pth")
 
         if loss < best:
             best = loss
             torch.save(model.state_dict(), run_dir / "best.pth")
-            print("Saved best model")
+            print(f"New best model: {best:.4f}")
 
 
 if __name__ == "__main__":

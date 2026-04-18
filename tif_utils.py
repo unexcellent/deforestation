@@ -12,31 +12,35 @@ def save_tif(mask: np.ndarray, meta: dict[str, Any], out_path: str | Path) -> No
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with rasterio.open(out_path, "w", **meta) as dst:
-        dst.write(mask, 1)
+    with rasterio.Env():
+        with rasterio.open(out_path, "w", **meta) as dst:
+            dst.write(mask, 1)
 
 
 def load_tif(
     path: str | Path, bands: list[int] | None = None, as_tensor: bool = True
 ) -> tuple[torch.Tensor | np.ndarray, dict[str, Any]]:
     """Loads a TIF file and returns it as a C x H x W tensor or array."""
-    with rasterio.open(path) as src:
-        if bands is not None:
-            for b in bands:
-                if b < 1 or b > src.count:
-                    raise ValueError(f"Invalid band {b} for {path}")
+    with rasterio.Env():
+        with rasterio.open(path) as src:
+            if bands is not None:
+                for b in bands:
+                    if b < 1 or b > src.count:
+                        raise ValueError(f"Invalid band {b} for {path}")
 
-            img = src.read(bands).astype(np.float32)
-        else:
-            img = src.read().astype(np.float32)
+                img = src.read(bands).astype(np.float32)
+            else:
+                img = src.read().astype(np.float32)
 
-            if img.ndim == 2:
-                img = img[np.newaxis, :, :]
+                if img.ndim == 2:
+                    img = img[np.newaxis, :, :]
+            
+            meta = src.meta
 
     if as_tensor:
         img = torch.from_numpy(img)
 
-    return img, src.meta
+    return img, meta
 
 
 def normalize_channels(
