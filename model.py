@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
 
 
 class FocalLoss(nn.Module):
@@ -30,31 +29,65 @@ class FocalLoss(nn.Module):
         return (loss * alpha_t).mean()
 
 
-class SegmentationModel(nn.Module):
-    def __init__(self, in_channels: int = 3, num_classes: int = 2) -> None:
+class DoubleConv(nn.Module):
+    """(convolution => [BN] => ReLU) * 2"""
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
-
-        backbone = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-        
-        if in_channels != 3:
-            backbone.conv1 = nn.Conv2d(
-                in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False
-            )
-
-        self.encoder = nn.Sequential(*list(backbone.children())[:-2])
-
-        self.head = nn.Sequential(
-            nn.Conv2d(512, 256, 3, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, 2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, 2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 2, stride=2),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, num_classes, 4, stride=4),
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.encoder(x)
-        return self.head(x)
+        return self.net(x)
+
+
+class SegmentationModel(nn.Module):
+    def __init__(self, in_channels: int = 12, num_classes: int = 2) -> None:
+        super().__init__()
+
+        # Encoder
+        self.inc = DoubleConv(in_channels, 64)
+        self.down1 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(64, 128))
+        self.down2 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(128, 256))
+        self.down3 = nn.Sequential(nn.MaxPool2d(2), DoubleConv(256, 512))
+
+        # Decoder with skip connections
+        self.up1 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.conv1 = DoubleConv(512, 256)
+
+        self.up2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.conv2 = DoubleConv(256, 128)
+
+        self.up3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.conv3 = DoubleConv(128, 64)
+
+        # Classifier head
+        self.outc = nn.Conv2d(64, num_classes, kernel_size=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Downsampling path
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+
+        # Upsampling path
+        x = self.up1(x4)
+        x = torch.cat([x, x3], dim=1)
+        x = self.conv1(x)
+
+        x = self.up2(x)
+        x = torch.cat([x, x2], dim=1)
+        x = self.conv2(x)
+
+        x = self.up3(x)
+        x = torch.cat([x, x1], dim=1)
+        x = self.conv3(x)
+
+        return self.outc(x)
