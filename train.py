@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 
 from dataloader import SegDataLoader
-from model import FocalLoss, SegmentationModel
+from model import FocalLoss, ResNet18UNet, SegmentationModel
 
 
 def worker_init(worker_id: int) -> None:
@@ -105,7 +105,7 @@ def main() -> None:
     parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-3 )
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--bands", nargs="+", type=int, default=[4, 3, 2])
     parser.add_argument("--split-ratio", type=float, default=0.8)
@@ -136,10 +136,8 @@ def main() -> None:
 
     print(f"Dataset Split: {len(train_loader.dataset)} train | {len(val_loader.dataset)} val")
 
-    model = SegmentationModel(
-        in_channels=len(args.bands), 
-        num_classes=2, 
-        base_c=16
+    model = ResNet18UNet(
+        num_classes=2
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)

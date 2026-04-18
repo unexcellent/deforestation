@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from dataloader import resize_img, resize_mask
-from model import SegmentationModel
+from model import ResNet18UNet, SegmentationModel
 from model_utils import find_latest_best_model
 from tif_utils import load_tif, normalize_channels, pair_data_to_mask_tif
 
@@ -87,7 +87,7 @@ def run(
     if not pairs:
         return
 
-    model = SegmentationModel(in_channels=len(bands)).to(DEVICE)
+    model = ResNet18UNet().to(DEVICE)
     model.load_state_dict(torch.load(checkpoint_path, map_location=DEVICE, weights_only=True))
     model.eval()
 

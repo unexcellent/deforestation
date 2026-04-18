@@ -1,90 +1,142 @@
 import argparse
+import time
 from pathlib import Path
 
+import numpy as np
 import torch
-from evaluate_model import find_latest_best_model
+from tqdm import tqdm
+
 from model_utils import load_model, predict
 from tif_utils import load_tif, normalize_channels, save_tif
 
 
-if torch.cuda.is_available():
-    DEVICE = "cuda"
-elif torch.mps.is_available():
-    DEVICE = "mps"
-else:
-    DEVICE = "cpu"
+def get_device() -> str:
+    """Detects the best available hardware accelerator."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
-def run(model, input_path, output_path, bands=None, device=DEVICE):
-    x, meta = load_tif(input_path, bands=bands)
+def run(
+    model: torch.nn.Module, 
+    input_path: Path, 
+    output_path: Path, 
+    bands: list[int] | None = None
+) -> None:
+    """
+    Loads a single TIFF, runs inference, and saves the georeferenced mask.
+    """
+    # 1. Load and prepare input
+    x, meta = load_tif(str(input_path), bands=bands)
+    
+    # Model expects 4D: [Batch, Channel, H, W]
     if x.dim() == 3:
         x = x.unsqueeze(0)
-    x  = normalize_channels(x)
-    mask = predict(model, x, device=device)
-    save_tif(mask, meta, output_path)
+    
+    x = normalize_channels(x)
+    
+    # 2. Inference (predict handles padding internally)
+    mask_tensor = predict(model, x)
+    
+    # 3. Format for Rasterio (Squeeze to 2D and move to CPU NumPy)
+    mask_np = mask_tensor.detach().cpu().numpy().astype(np.uint8)
+    mask_np = np.squeeze(mask_np) 
+
+    # 4. Update metadata for a single-band classification map
+    meta.update({
+        "driver": "GTiff",
+        "count": 1,
+        "dtype": "uint8",
+        "nodata": 0
+    })
+
+    save_tif(mask_np, meta, str(output_path))
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Batch Export Predicted Deforestation Masks")
 
     parser.add_argument(
         "--checkpoint",
         type=str,
-        help="Path to checkpoint (defaults to latest best.pth)"
+        required=True,
+        help="Path to the trained .pth checkpoint"
     )
 
     parser.add_argument(
         "--input",
         type=str,
         required=True,
-        help="Input .tif file or folder"
+        help="Input .tif file or directory containing .tif files"
     )
 
     parser.add_argument(
         "--output",
         type=str,
         default="data/model_output_tif",
-        help="Output folder for predicted GeoTIFFs"
+        help="Directory where predicted GeoTIFFs will be saved"
     )
 
     parser.add_argument(
         "--bands",
         nargs="+",
         type=int,
-        default=None,
-        help="Band indices (e.g. 4 3 2)"
+        default=[4, 3, 2],
+        help="Band indices used during training (e.g., 4 3 2 for RGB)"
     )
 
     parser.add_argument(
         "--device",
         type=str,
-        default=DEVICE
+        default=get_device(),
+        help="Force device (cuda, mps, or cpu)"
     )
 
     args = parser.parse_args()
 
-    checkpoint = (
-        Path(args.checkpoint)
-        if args.checkpoint
-        else find_latest_best_model()
-    )
-
-    model = load_model(checkpoint, device=args.device)
-
+    # Setup paths
     input_path = Path(args.input)
     output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Load model once for all files
+    model = load_model(
+        args.checkpoint, 
+        device=args.device, 
+        in_channels=len(args.bands)
+    )
+    print(f"Loaded model onto {args.device}. Starting batch processing...")
+
+    # Discover files
     if input_path.is_file():
-        out_path = output_dir / f"{input_path.stem}_pred.tif"
-        run(model, input_path, out_path, args.bands, args.device)
-
+        files_to_process = [input_path]
     else:
-        tifs = list(input_path.rglob("*.tif"))
-        for p in tifs:
-            out_path = output_dir / f"{p.stem}_pred.tif"
-            run(model, p, out_path, args.bands, args.device)
+        # Recursively find all TIFs, but ignore files we already predicted
+        files_to_process = [
+            p for p in input_path.rglob("*.tif") 
+            if not p.stem.endswith("_pred")
+        ]
 
-    print("Done.")
+    if not files_to_process:
+        print(f"No valid .tif files found at {input_path}")
+        return
+
+    # Process loop with progress bar
+    start_time = time.time()
+    for p in tqdm(files_to_process, desc="Exporting TIFs"):
+        try:
+            # We mirror the stem but add a suffix to avoid overwriting inputs
+            out_path = output_dir / f"{p.stem}_pred.tif"
+            run(model, p, out_path, bands=args.bands)
+        except Exception as e:
+            print(f"\nError processing {p.name}: {e}")
+            continue
+
+    duration = time.time() - start_time
+    print(f"\nSuccessfully processed {len(files_to_process)} files in {duration:.2f}s.")
+    print(f"Results saved to: {output_dir.resolve()}")
 
 
 if __name__ == "__main__":

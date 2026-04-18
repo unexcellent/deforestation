@@ -4,8 +4,8 @@ import torch
 from model import SegmentationModel
 
 
-def load_model(checkpoint_path, device="cuda"):
-    model = SegmentationModel(num_classes=2)
+def load_model(checkpoint_path, in_channels, device="cuda"):
+    model = SegmentationModel(num_classes=2, in_channels=in_channels)
     state = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state)
     model.to(device)
@@ -24,10 +24,40 @@ def find_latest_best_model(checkpoint_root=Path("checkpoints")):
 
     raise FileNotFoundError("No best.pth found")
 
+import torch
+import torch.nn.functional as F
 
-@torch.no_grad()
-def predict(model, x, device="cuda"):
-    x = x.to(device)
+@torch.inference_mode()
+def predict(model: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
+    """
+    Predicts a mask while handling:
+    1. Device mismatch (moves input to model device)
+    2. Dimension mismatch (pads to multiples of 32 for U-Net)
+    3. Output format (Argmax for multiclass, Sigmoid for binary)
+    """
+    model.eval().cpu()
+    x = x.cpu()
+    
+    # Handle U-Net dimension constraints (must be multiple of 32)
+    _, _, h, w = x.shape
+    pad_h = (32 - h % 32) % 32
+    pad_w = (32 - w % 32) % 32
+    
+    if pad_h > 0 or pad_w > 0:
+        # Using reflect padding to avoid edge artifacts in satellite imagery
+        x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+    
     logits = model(x)
-    pred = torch.argmax(logits, dim=1)
-    return pred.squeeze(0).cpu().numpy().astype(np.uint8)
+    
+    # Crop back to original dimensions if we padded
+    if pad_h > 0 or pad_w > 0:
+        logits = logits[:, :, :h, :w]
+        
+    # Determine output based on channel count
+    # Shape [B, C, H, W]
+    if logits.shape[1] > 1:
+        # Multiclass: return class indices
+        return torch.argmax(logits, dim=1)
+    else:
+        # Binary: return 0 or 1
+        return (torch.sigmoid(logits) > 0.5).long()
