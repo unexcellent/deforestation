@@ -3,14 +3,12 @@ import os
 import time
 from pathlib import Path
 
-import rasterio
 import torch
 import torch.multiprocessing as mp
-from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from dataloader import SegDataset, batch_collate_fn
+from dataloader import SegDataLoader
 from model import FocalLoss, SegmentationModel
-from tif_utils import pair_data_to_mask_tif
 
 
 def worker_init(worker_id: int) -> None:
@@ -24,81 +22,113 @@ def worker_init(worker_id: int) -> None:
     os.environ["MKL_NUM_THREADS"] = "1"
 
 
+def compute_iou(preds: torch.Tensor, masks: torch.Tensor, eps: float = 1e-6) -> float:
+    """Computes Intersection over Union for binary segmentation."""
+    # Convert logits to binary predictions
+    preds = (torch.sigmoid(preds) > 0.5).float()
+    
+    intersection = (preds * masks).sum(dim=(1, 2))
+    union = preds.sum(dim=(1, 2)) + masks.sum(dim=(1, 2)) - intersection
+    
+    iou = (intersection + eps) / (union + eps)
+    return iou.mean().item()
+
+
 def train_one_epoch(
     model: torch.nn.Module,
-    loader: DataLoader,
+    loader: SegDataLoader,
     optimizer: torch.optim.Optimizer,
     loss_fn: torch.nn.Module,
     device: torch.device,
-) -> float:
+    epoch: int,
+) -> tuple[float, float]:
     model.train()
     total_loss = 0.0
+    total_iou = 0.0
 
-    for imgs, masks in loader:
-        imgs = imgs.to(device)
-        masks = masks.to(device)
+    pbar = tqdm(loader, desc=f"Epoch {epoch} [Train]", leave=False)
+    for imgs, masks in pbar:
+        imgs, masks = imgs.to(device), masks.to(device)
 
         preds = model(imgs)
-
         loss = loss_fn(preds, masks)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
+        metric = compute_iou(preds, masks)
         total_loss += loss.item()
+        total_iou += metric
+        
+        pbar.set_postfix(loss=f"{loss.item():.4f}", iou=f"{metric:.4f}")
 
-    return total_loss / len(loader)
+    return total_loss / len(loader), total_iou / len(loader)
+
+
+@torch.inference_mode()
+def evaluate(
+    model: torch.nn.Module,
+    loader: SegDataLoader,
+    loss_fn: torch.nn.Module,
+    device: torch.device,
+) -> tuple[float, float]:
+    model.eval()
+    total_loss = 0.0
+    total_iou = 0.0
+
+    for imgs, masks in tqdm(loader, desc="Evaluating", leave=False):
+        imgs, masks = imgs.to(device), masks.to(device)
+        preds = model(imgs)
+        
+        loss = loss_fn(preds, masks)
+        metric = compute_iou(preds, masks)
+        
+        total_loss += loss.item()
+        total_iou += metric
+
+    return total_loss / len(loader), total_iou / len(loader)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Sentinel-2 Segmentation Model")
-    parser.add_argument(
-        "--img-root", type=str, default="data/makeathon-challenge/sentinel-2"
-    )
+    parser.add_argument("--img-root", type=str, default="data/makeathon-challenge/sentinel-2")
     parser.add_argument("--mask-root", type=str, default="data/preprocessed/labels")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
-    
-    # Updated to accept two integers (Height and Width)
-    parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256], help="Target size as H W")
+    parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--bands", nargs="+", type=int, default=[4, 3, 2])
+    parser.add_argument("--split-ratio", type=float, default=0.8)
 
     args = parser.parse_args()
 
     device = torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.mps.is_available()
+        "cuda" if torch.cuda.is_available() 
+        else "mps" if torch.backends.mps.is_available() 
         else "cpu"
     )
+    print(f"--- Training on Device: {device} ---")
 
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    img_label_pairs = pair_data_to_mask_tif(
-        Path(args.img_root), Path(args.mask_root), "train"
-    )
-
-    dataset = SegDataset(
-        pairs=img_label_pairs, 
-        target_size=(args.img_size, args.img_size),
-        bands=args.bands
-    )
-
-    loader = DataLoader(
-        dataset,
+    train_loader, val_loader = SegDataLoader.create_split_loaders(
+        img_root=args.img_root,
+        mask_root=args.mask_root,
+        target_size=args.img_size,
+        bands=args.bands,
+        split="train",         # Scans 'train' subfolder
+        train_ratio=args.split_ratio,
         batch_size=args.batch_size,
         num_workers=args.workers,
-        collate_fn=batch_collate_fn,
-        shuffle=True,
         worker_init_fn=worker_init,
-        pin_memory=False,
+        pin_memory=False
     )
+
+    print(f"Dataset Split: {len(train_loader.dataset)} train | {len(val_loader.dataset)} val")
 
     model = SegmentationModel(
         in_channels=len(args.bands), 
@@ -112,19 +142,26 @@ def main() -> None:
     run_dir = checkpoint_dir / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir()
 
-    best = float("inf")
+    best_iou = 0.0
 
-    for epoch in range(args.epochs):
-        loss = train_one_epoch(model, loader, optimizer, loss_fn, device)
+    for epoch in range(1, args.epochs + 1):
+        train_loss, train_iou = train_one_epoch(
+            model, train_loader, optimizer, loss_fn, device, epoch
+        )
+        val_loss, val_iou = evaluate(model, val_loader, loss_fn, device)
 
-        print(f"Epoch {epoch + 1}/{args.epochs} | Loss: {loss:.4f}")
+        print(
+            f"Epoch {epoch:02d} | "
+            f"Train Loss: {train_loss:.4f} IoU: {train_iou:.4f} | "
+            f"Val Loss: {val_loss:.4f} IoU: {val_iou:.4f}"
+        )
 
         torch.save(model.state_dict(), run_dir / "last.pth")
 
-        if loss < best:
-            best = loss
+        if val_iou > best_iou:
+            best_iou = val_iou
             torch.save(model.state_dict(), run_dir / "best.pth")
-            print("Saved best model")
+            print(f"New best IoU: {best_iou:.4f} (Saved best.pth)")
 
 
 if __name__ == "__main__":
