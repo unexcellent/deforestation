@@ -59,12 +59,12 @@ def reproject_raster(
     return destination
 
 
-def plot_image(image: np.ndarray, title: str) -> None:
+def plot_image(image: np.ndarray, title: str, cmap: str = "gray") -> None:
     """
     Renders the image using matplotlib.
     """
     plt.figure(figsize=(12, 12))
-    plt.imshow(image, cmap="gray")
+    plt.imshow(image, cmap=cmap)
     plt.title(title)
     plt.axis("off")
     plt.tight_layout()
@@ -226,6 +226,37 @@ def geo(path: str) -> None:
     """
     gdf = gpd.read_file(path)
     plot_geojson(gdf, f"GeoJSON: {path}")
+
+
+@_cli.command()
+@click.argument("path", type=click.Path(exists=True))
+@click.option(
+    "--blue-band",
+    type=int,
+    default=2,
+    help="The band index for Blue (1-based) to detect clouds.",
+)
+@click.option(
+    "--threshold",
+    type=int,
+    default=2000,
+    help="The threshold value on the blue band for cloud detection.",
+)
+def clouds(path: str, blue_band: int, threshold: int) -> None:
+    """
+    Displays the binary cloud mask for a given image.
+    """
+    with rasterio.open(path) as src:
+        if blue_band > src.count:
+            raise click.BadParameter(
+                f"Requested blue band {blue_band} exceeds file band count ({src.count})."
+            )
+        blue_data = src.read(blue_band)
+
+    cloud_mask = (blue_data > threshold).astype(np.uint8)
+    plot_image(
+        cloud_mask, f"Cloud Mask (Threshold: {threshold}): {path}", cmap="binary"
+    )
 
 
 if __name__ == "__main__":

@@ -10,12 +10,20 @@ class FocalLoss(nn.Module):
         self.gamma = gamma
         self.alpha = alpha
 
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Calculates Focal Loss, optionally ignoring pixels via a binary mask.
+        mask: 1 for valid pixels, 0 for ignored (clouds/no-data).
+        """
         log_probs = F.log_softmax(logits, dim=1)
         probs = torch.exp(log_probs)
 
         targets = targets.long()
-
         log_pt = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         pt = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
 
@@ -27,7 +35,16 @@ class FocalLoss(nn.Module):
             torch.tensor(1 - self.alpha, device=logits.device),
         )
 
-        return (loss * alpha_t).mean()
+        weighted_loss = loss * alpha_t
+
+        if mask is not None:
+            # Cast mask to float and ensure same shape as loss [B, H, W]
+            mask = mask.float()
+            weighted_loss = weighted_loss * mask
+            # Average only over valid pixels to prevent loss dilution
+            return weighted_loss.sum() / (mask.sum() + 1e-6)
+
+        return weighted_loss.mean()
 
 
 class DoubleConv(nn.Module):
@@ -49,7 +66,9 @@ class DoubleConv(nn.Module):
 
 
 class SegmentationModel(nn.Module):
-    def __init__(self, in_channels: int = 12, num_classes: int = 2, base_c: int = 16) -> None:
+    def __init__(
+        self, in_channels: int = 12, num_classes: int = 2, base_c: int = 16
+    ) -> None:
         super().__init__()
 
         self.inc = DoubleConv(in_channels, base_c)
@@ -90,12 +109,18 @@ class SegmentationModel(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels: int, up_channels: int, skip_channels: int, out_channels: int) -> None:
+    def __init__(
+        self, in_channels: int, up_channels: int, skip_channels: int, out_channels: int
+    ) -> None:
         super().__init__()
         self.up = nn.ConvTranspose2d(in_channels, up_channels, kernel_size=2, stride=2)
-        self.conv = nn.Conv2d(up_channels + skip_channels, out_channels, kernel_size=3, padding=1)
+        self.conv = nn.Conv2d(
+            up_channels + skip_channels, out_channels, kernel_size=3, padding=1
+        )
 
-    def forward(self, x: torch.Tensor, skip: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, skip: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = self.up(x)
         if skip is not None:
             x = torch.cat([x, skip], dim=1)
@@ -103,12 +128,18 @@ class DecoderBlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels: int, up_channels: int, skip_channels: int, out_channels: int) -> None:
+    def __init__(
+        self, in_channels: int, up_channels: int, skip_channels: int, out_channels: int
+    ) -> None:
         super().__init__()
         self.up = nn.ConvTranspose2d(in_channels, up_channels, kernel_size=2, stride=2)
-        self.conv = nn.Conv2d(up_channels + skip_channels, out_channels, kernel_size=3, padding=1)
+        self.conv = nn.Conv2d(
+            up_channels + skip_channels, out_channels, kernel_size=3, padding=1
+        )
 
-    def forward(self, x: torch.Tensor, skip: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, skip: torch.Tensor | None = None
+    ) -> torch.Tensor:
         x = self.up(x)
         if skip is not None:
             x = torch.cat([x, skip], dim=1)
