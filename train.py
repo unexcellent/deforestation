@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 from tqdm import tqdm
 
 from dataloader import SegDataLoader
-from model import FocalLoss, ResNet18UNet, SegmentationModel
+from model import FocalLoss, ResNet18UNet
 
 
 def worker_init(worker_id: int) -> None:
@@ -24,16 +24,11 @@ def worker_init(worker_id: int) -> None:
 
 def compute_iou(preds: torch.Tensor, masks: torch.Tensor, eps: float = 1e-6) -> float:
     """Computes IoU for binary segmentation handling 1 or 2 output channels."""
-    # Handle both 1-channel (BCE style) and 2-channel (CE style) outputs
     if preds.shape[1] > 1:
-        # Multiclass: [B, 2, H, W] -> [B, H, W]
         preds = torch.argmax(preds, dim=1)
     else:
-        # Binary: [B, 1, H, W] -> [B, H, W]
         preds = (torch.sigmoid(preds) > 0.5).squeeze(1)
 
-    # Intersection and Union for the positive class (1)
-    # We use logical operators to ensure we only count deforestation pixels
     intersection = ((preds == 1) & (masks == 1)).float().sum(dim=(1, 2))
     union = ((preds == 1) | (masks == 1)).float().sum(dim=(1, 2))
     
@@ -102,10 +97,11 @@ def main() -> None:
     parser.add_argument("--img-root", type=str, default="data/makeathon-challenge/sentinel-2")
     parser.add_argument("--mask-root", type=str, default="data/preprocessed/labels")
     parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .pth file to resume training")
     parser.add_argument("--img-size", nargs=2, type=int, default=[256, 256])
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-3 )
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--bands", nargs="+", type=int, default=[4, 3, 2])
     parser.add_argument("--split-ratio", type=float, default=0.8)
@@ -134,21 +130,36 @@ def main() -> None:
         worker_init_fn=worker_init
     )
 
-    print(f"Dataset Split: {len(train_loader.dataset)} train | {len(val_loader.dataset)} val")
-
-    model = ResNet18UNet(
-        num_classes=2
-    ).to(device)
-
+    model = ResNet18UNet(num_classes=2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = FocalLoss(gamma=2.0, alpha=0.75)
+
+    start_epoch = 1
+    best_iou = 0.0
+
+    if args.resume:
+        if os.path.isfile(args.resume):
+            print(f"Loading checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device, weights_only=False)
+            
+            # Check if checkpoint is a full state dict or just model weights
+            if "model_state_dict" in checkpoint:
+                model.load_state_dict(checkpoint["model_state_dict"])
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                start_epoch = checkpoint["epoch"] + 1
+                best_iou = checkpoint.get("best_iou", 0.0)
+            else:
+                # Fallback for simple weight loading
+                model.load_state_dict(checkpoint)
+            
+            print(f"Resuming from epoch {start_epoch}")
+        else:
+            print(f"No checkpoint found at: {args.resume}")
 
     run_dir = checkpoint_dir / time.strftime("%Y%m%d-%H%M%S")
     run_dir.mkdir()
 
-    best_iou = 0.0
-
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_iou = train_one_epoch(
             model, train_loader, optimizer, loss_fn, device, epoch
         )
@@ -160,11 +171,18 @@ def main() -> None:
             f"Val Loss: {val_loss:.4f} IoU: {val_iou:.4f}"
         )
 
-        torch.save(model.state_dict(), run_dir / "last.pth")
+        state = {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_iou": best_iou,
+        }
+
+        torch.save(state, run_dir / "last.pth")
 
         if val_iou > best_iou:
             best_iou = val_iou
-            torch.save(model.state_dict(), run_dir / "best.pth")
+            torch.save(state, run_dir / "best.pth")
             print(f"New best IoU: {best_iou:.4f} (Saved best.pth)")
 
 
