@@ -116,6 +116,7 @@ def main() -> None:
     model = ResNet18UNet(num_classes=2).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     loss_fn = FocalLoss(gamma=2.0, alpha=0.75)
+    checkpoint_dir = Path(args.checkpoint_dir)
 
     start_epoch = 1
     best_iou = 0.0

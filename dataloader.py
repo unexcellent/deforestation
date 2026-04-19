@@ -164,6 +164,7 @@ class SegDataLoader:
             num_workers=num_workers,
             collate_fn=batch_collate_fn,
             worker_init_fn=worker_init_fn,
+            persistent_workers=True,
         )
 
     @classmethod
