@@ -1,11 +1,11 @@
 from pathlib import Path
-import numpy as np
 import torch
-from model import SegmentationModel
+
+from model import ResNet18UNet
 
 
 def load_model(checkpoint_path, in_channels, device="cuda"):
-    model = SegmentationModel(num_classes=2, in_channels=in_channels)
+    model = ResNet18UNet(num_classes=2)
     state = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(state)
     model.to(device)
