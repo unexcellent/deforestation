@@ -63,6 +63,9 @@ def download_s3_folder(
             if target.exists():
                 continue
 
+            if "sentinel-2" not in str(target) and "label" not in str(target):
+                continue
+
             target.parent.mkdir(parents=True, exist_ok=True)
             s3.download_file(bucket_name, key, str(target))
 
